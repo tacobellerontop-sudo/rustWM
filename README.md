@@ -51,7 +51,7 @@ rwm autostart on                   # start at login
 ```
 
 Or just double-click `rwm.exe` (or run it with no arguments) for a menu: start/stop,
-edit and check the config, edit and list your keybindings, autostart, and "Add rwm to
+edit and check the config, edit (in the kerys settings window) and list your keybindings, autostart, and "Add rwm to
 PATH" so `rwm` works without `.\` in any new terminal.
 
 Keep the three `.exe` files in the same folder. When building from source, build

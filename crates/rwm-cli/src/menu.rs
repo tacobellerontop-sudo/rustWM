@@ -96,7 +96,7 @@ impl Item {
             Item::Restart => "Restart rustWM",
             Item::EditConfig => "Edit config (changes apply when you save)",
             Item::CheckConfig => "Check config for errors",
-            Item::EditKeys => "Edit keybindings (kerys.toml)",
+            Item::EditKeys => "Edit keybindings (settings window)",
             Item::Keybindings => "Show keybindings",
             Item::Autostart(true) => "Start rustWM when I log in",
             Item::Autostart(false) => "Don't start rustWM when I log in",
@@ -128,15 +128,13 @@ impl Item {
                 Ok(())
             }
             Item::EditKeys => {
-                let keys = kerys_config_path();
-                if !keys.exists() {
-                    anyhow::bail!(
-                        "{} does not exist yet; start rustWM once and kerys writes it",
-                        keys.display()
-                    );
-                }
-                open(&keys)?;
-                println!("  Opened {}", keys.display());
+                std::process::Command::new(kerys_path())
+                    .arg("gui")
+                    .spawn()
+                    .map_err(|e| {
+                        anyhow::anyhow!("cannot run kerys ({e}); keep kerys.exe next to rwm.exe")
+                    })?;
+                println!("  Opened the kerys settings window");
                 Ok(())
             }
             Item::Keybindings => {
@@ -211,16 +209,6 @@ fn summary() -> Option<String> {
         plural(monitors.len(), "monitor"),
         plural(windows, "window")
     ))
-}
-
-/// kerys's config: `%USERPROFILE%\.config\kerys\kerys.toml`.
-fn kerys_config_path() -> PathBuf {
-    rwm_config::default_path()
-        .parent()
-        .and_then(Path::parent)
-        .map_or_else(PathBuf::new, Path::to_path_buf)
-        .join("kerys")
-        .join("kerys.toml")
 }
 
 /// kerys.exe next to rwm.exe, or else whatever is on PATH.
