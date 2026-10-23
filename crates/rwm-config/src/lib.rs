@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rwm_core::Command;
 use rwm_core::layout::{Gaps, LayoutKind};
 use rwm_core::rules::{Rule, RuleAction};
-use rwm_core::wm::{DEFAULT_MODE, Settings};
+use rwm_core::wm::{BorderSettings, DEFAULT_MODE, Settings};
 use rwm_core::workspace::{InsertPos, WorkspaceMode};
 use serde::Deserialize;
 
@@ -27,6 +27,7 @@ const UNBIND: &str = "none";
 pub struct Config {
     pub general: General,
     pub gaps: GapsConfig,
+    pub border: BorderConfig,
     pub bindings: BTreeMap<String, String>,
     /// Extra binding modes: mode name -> chord -> command.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
@@ -40,6 +41,7 @@ pub struct General {
     pub new_window: InsertPos,
     pub workspaces: Vec<String>,
     pub workspace_mode: WorkspaceMode,
+    pub focus_follows_mouse: bool,
     /// Command line launched by the `terminal` command. `None` falls back to
     /// `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
@@ -53,6 +55,7 @@ impl Default for General {
             new_window: s.new_window,
             workspaces: s.workspaces,
             workspace_mode: s.workspace_mode,
+            focus_follows_mouse: s.focus_follows_mouse,
             terminal: None,
         }
     }
@@ -75,6 +78,34 @@ impl Default for GapsConfig {
             smart: g.smart,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BorderConfig {
+    pub enabled: bool,
+    pub width: i32,
+    /// `#rrggbb`.
+    pub color: String,
+}
+
+impl Default for BorderConfig {
+    fn default() -> Self {
+        let b = BorderSettings::default();
+        Self {
+            enabled: b.enabled,
+            width: b.width,
+            color: format!("#{:06x}", b.color),
+        }
+    }
+}
+
+/// Parses `#rrggbb` (the `#` is optional) into 0xRRGGBB.
+fn parse_color(s: &str) -> Option<u32> {
+    let hex = s.trim().strip_prefix('#').unwrap_or(s.trim());
+    (hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(hex, 16).ok())
+        .flatten()
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -228,6 +259,19 @@ impl Config {
         if self.gaps.inner < 0 || self.gaps.outer < 0 {
             errors.push("gaps: inner and outer must not be negative".into());
         }
+        if !(0..=50).contains(&self.border.width) {
+            errors.push(format!(
+                "border.width: must be 0 to 50, got {}",
+                self.border.width
+            ));
+        }
+        let border_color = parse_color(&self.border.color).unwrap_or_else(|| {
+            errors.push(format!(
+                "border.color: `{}` is not a #rrggbb colour",
+                self.border.color
+            ));
+            BorderSettings::default().color
+        });
 
         let mut bindings: BTreeMap<Chord, String> = default_bindings().into_iter().collect();
         parse_bindings("bindings", &self.bindings, &mut bindings, &mut errors);
@@ -306,6 +350,12 @@ impl Config {
                 default_layout: self.general.default_layout,
                 workspaces: self.general.workspaces,
                 workspace_mode: self.general.workspace_mode,
+                focus_follows_mouse: self.general.focus_follows_mouse,
+                border: BorderSettings {
+                    enabled: self.border.enabled,
+                    width: self.border.width,
+                    color: border_color,
+                },
                 terminal: self.general.terminal.map(|t| t.trim().to_string()),
                 rules,
             },
@@ -360,7 +410,12 @@ mod tests {
             new_window = "end"
             workspaces = ["web", "code"]
             workspace_mode = "global"
+            focus_follows_mouse = true
             terminal = "wezterm-gui.exe"
+
+            [border]
+            width = 5
+            color = '#FF8800'
 
             [gaps]
             inner = 4
@@ -383,6 +438,17 @@ mod tests {
         assert_eq!(s.new_window, InsertPos::End);
         assert_eq!(s.workspaces, vec!["web", "code"]);
         assert_eq!(s.workspace_mode, WorkspaceMode::Global);
+        assert!(s.focus_follows_mouse);
+        assert_eq!(
+            s.border,
+            BorderSettings {
+                enabled: true,
+                width: 5,
+                color: 0xff8800
+            }
+        );
+        assert!(parse("[border]\ncolor = \"blue\"").is_err());
+        assert!(parse("[border]\nwidth = -1").is_err());
         assert!(parse("[general]\nworkspace_mode = \"both\"").is_err());
         assert_eq!(s.terminal.as_deref(), Some("wezterm-gui.exe"));
         assert_eq!(

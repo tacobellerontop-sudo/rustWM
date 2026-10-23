@@ -18,14 +18,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_NAMECHANGE,
     EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GA_ROOT, GetAncestor, GetMessageW, MSG,
-    OBJID_WINDOW, PostThreadMessageW, RegisterClassW, SPI_SETWORKAREA, TranslateMessage,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_DISPLAYCHANGE, WM_QUIT, WM_SETTINGCHANGE,
-    WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, GA_ROOT,
+    GetAncestor, GetMessageW, MSG, OBJID_WINDOW, PostThreadMessageW, RegisterClassW,
+    SPI_SETWORKAREA, TranslateMessage, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    WM_DISPLAYCHANGE, WM_QUIT, WM_SETTINGCHANGE, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{BOOL, w};
 
-use crate::{hotkeys, tray, window};
+use crate::{border, hotkeys, tray, window};
 
 /// Where every callback sends its events. Set once by [`EventThread::spawn`];
 /// the callbacks are plain `extern "system"` functions with no user data.
@@ -42,7 +42,7 @@ pub(crate) fn send(event: Event) {
 /// also deliver `EVENT_OBJECT_LOCATIONCHANGE`, which fires constantly.
 const HOOK_RANGES: &[(u32, u32)] = &[
     (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
-    (EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND),
+    (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
     (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
     (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE),
     (EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE),
@@ -77,6 +77,7 @@ unsafe extern "system" fn win_event_proc(
         EVENT_SYSTEM_FOREGROUND => Event::WindowFocused(h),
         EVENT_SYSTEM_MINIMIZESTART => Event::WindowMinimized(h),
         EVENT_SYSTEM_MINIMIZEEND => Event::WindowRestored(h),
+        EVENT_SYSTEM_MOVESIZESTART => Event::WindowMoveStarted(h),
         EVENT_SYSTEM_MOVESIZEEND => Event::WindowMoveEnded(h),
         EVENT_OBJECT_NAMECHANGE => Event::WindowTitleChanged(h),
         _ => return,
@@ -202,6 +203,7 @@ fn run() {
         .collect();
     let keyboard = hotkeys::install();
     let hidden = create_hidden_window();
+    border::create();
     match hidden {
         Some(h) => tray::add(h),
         None => warn!("could not create the hidden window; display changes will be missed"),

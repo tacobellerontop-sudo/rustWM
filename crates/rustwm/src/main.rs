@@ -78,6 +78,7 @@ fn load_config(path: &std::path::Path) -> (rwm_config::Loaded, Option<String>) {
 #[cfg(windows)]
 fn apply_bindings(loaded: &rwm_config::Loaded) {
     rwm_win32::set_bindings(loaded.bindings.clone(), loaded.modes.clone());
+    rwm_win32::set_focus_follows_mouse(loaded.settings.focus_follows_mouse);
 }
 
 #[cfg(windows)]

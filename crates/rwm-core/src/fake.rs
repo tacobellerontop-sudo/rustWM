@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::platform::Result;
-use crate::{MonitorInfo, Platform, PlatformError, Rect, WindowHandle, WindowInfo};
+use crate::{Border, MonitorInfo, Platform, PlatformError, Rect, WindowHandle, WindowInfo};
 
 /// One call the core made into the platform.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +34,8 @@ pub struct FakePlatform {
     pub min_size: BTreeMap<WindowHandle, (i32, i32)>,
     /// Command lines starting with any of these fail to spawn.
     pub failing_spawns: Vec<String>,
+    /// The focus border as last drawn.
+    pub border: Option<Border>,
 }
 
 impl FakePlatform {
@@ -187,5 +189,9 @@ impl Platform for FakePlatform {
             });
         }
         Ok(())
+    }
+
+    fn set_border(&mut self, border: Option<Border>) {
+        self.border = border;
     }
 }

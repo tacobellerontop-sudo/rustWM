@@ -14,8 +14,12 @@ pub enum Event {
     WindowFocused(WindowHandle),
     WindowMinimized(WindowHandle),
     WindowRestored(WindowHandle),
+    /// The user started dragging or resizing a window.
+    WindowMoveStarted(WindowHandle),
     /// The user finished dragging or resizing a window.
     WindowMoveEnded(WindowHandle),
+    /// The mouse settled over this top-level window (focus follows mouse).
+    MouseOver(WindowHandle),
     WindowTitleChanged(WindowHandle),
     /// Monitors were added, removed or rearranged.
     DisplayChanged,

@@ -16,6 +16,8 @@ workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 # only the monitor you're on). "global": all monitors switch together, as one
 # big desktop. Win+Alt+W toggles between them.
 workspace_mode = "per-monitor"
+# Focus a window just by moving the mouse onto it, without clicking.
+focus_follows_mouse = false
 # Command launched by the "terminal" command (Win+Enter). Any exe plus args,
 # e.g. "wezterm-gui.exe", "alacritty.exe" or "pwsh.exe". When unset, rustWM
 # tries wt.exe, then cmd.exe.
@@ -25,6 +27,12 @@ workspace_mode = "per-monitor"
 inner = 8      # between windows, in pixels at 100% scale
 outer = 8      # between windows and the screen edge
 smart = true   # no gaps when a workspace has a single window
+
+# A coloured frame drawn just inside the focused window's edge.
+[border]
+enabled = true
+width = 3            # pixels at 100% scale
+color = "#89b4fa"    # #rrggbb
 
 # Bindings are merged over the built-in defaults shown here. Set a chord to
 # "none" to unbind it. Modifiers: win, ctrl, alt, shift.

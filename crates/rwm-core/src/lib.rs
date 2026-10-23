@@ -22,6 +22,6 @@ pub mod fake;
 pub use command::Command;
 pub use event::Event;
 pub use geometry::{Direction, Rect};
-pub use platform::{MonitorInfo, Platform, PlatformError};
+pub use platform::{Border, MonitorInfo, Platform, PlatformError};
 pub use window::{WindowHandle, WindowInfo};
 pub use wm::Wm;
