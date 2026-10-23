@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# CI checks kerys out here to ship it in the same zip; it has its own workspace.
+exclude = ["kerys"]
 
 [workspace.package]
 version = "0.1.0"
