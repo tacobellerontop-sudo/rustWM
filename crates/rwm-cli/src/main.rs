@@ -18,7 +18,7 @@ use rwm_ipc::{Client, Request, Response};
     about = "Control the rustWM tiling window manager",
     after_help = "Run rwm with no arguments for a menu.\n\n\
                   Any other command is sent to rustWM, e.g. `rwm focus left`, `rwm workspace 3`, \
-                  `rwm layout master`. They are the same commands as in [bindings]."
+                  `rwm layout master`. They are the same commands kerys binds to keys."
 )]
 struct Cli {
     #[command(subcommand)]

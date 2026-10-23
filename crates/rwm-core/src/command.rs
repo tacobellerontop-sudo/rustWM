@@ -1,7 +1,7 @@
-//! The command language shared by hotkey bindings, the CLI and IPC.
+//! The command language of the CLI and IPC, and so of hotkey daemons like
+//! kerys, which send these strings over the pipe.
 //!
-//! Every binding in the config maps to one of these strings, e.g.
-//! `"focus left"`, `"move right"` or `"exec wezterm-gui.exe"`.
+//! For example `"focus left"`, `"move right"` or `"exec wezterm-gui.exe"`.
 
 use std::fmt;
 use std::str::FromStr;
@@ -65,8 +65,6 @@ pub enum Command {
     /// `toggle-special [name]`: show or hide a special (scratchpad) workspace
     /// over the focused monitor. The name defaults to `scratch`.
     ToggleSpecial(String),
-    /// `mode <name>`: switch key-binding mode (`default` to leave).
-    Mode(String),
     /// Show every hidden window without quitting.
     Restore,
     /// Restore all windows and exit.
@@ -217,7 +215,6 @@ impl FromStr for Command {
                 Ok(Command::ToggleSpecial(DEFAULT_SPECIAL.into()))
             }
             "toggle-special" => name_arg("toggle-special", rest).map(Command::ToggleSpecial),
-            "mode" => name_arg("mode", rest).map(Command::Mode),
             "exec" if rest.is_empty() => Err(ParseError::BadArgument {
                 cmd: "exec",
                 expected: "a command line",
@@ -264,7 +261,6 @@ impl fmt::Display for Command {
             Command::ToggleFullscreen => f.write_str("toggle-fullscreen"),
             Command::Reload => f.write_str("reload"),
             Command::ToggleSpecial(n) => write!(f, "toggle-special {n}"),
-            Command::Mode(m) => write!(f, "mode {m}"),
             Command::Restore => f.write_str("restore"),
             Command::Quit => f.write_str("quit"),
         }
@@ -311,7 +307,6 @@ mod tests {
             "toggle-fullscreen",
             "reload",
             "toggle-special music",
-            "mode resize",
             "move-to-workspace special:scratch",
         ] {
             assert_eq!(parse(s).to_string(), s);
@@ -350,7 +345,6 @@ mod tests {
             "focus-monitor next",
             "workspace-mode",
             "workspace-mode both",
-            "mode",
         ] {
             assert!(
                 matches!(bad.parse::<Command>(), Err(ParseError::BadArgument { .. })),

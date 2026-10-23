@@ -75,9 +75,22 @@ fn load_config(path: &std::path::Path) -> (rwm_config::Loaded, Option<String>) {
     }
 }
 
+/// Starts the configured hotkey daemon. rustWM keeps running without one:
+/// `rwm` and scripts still work, only the keys do not.
 #[cfg(windows)]
-fn apply_bindings(loaded: &rwm_config::Loaded) {
-    rwm_win32::set_bindings(loaded.bindings.clone(), loaded.modes.clone());
+fn start_hotkeys(command_line: Option<&str>) -> Option<rwm_win32::HotkeyDaemon> {
+    let command_line = command_line?;
+    match rwm_win32::HotkeyDaemon::start(command_line) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::error!(%command_line, error = %e, "could not start the hotkey daemon");
+            rwm_win32::notify(
+                "rustWM has no hotkeys",
+                &format!("Could not start {command_line}: {e}. Put kerys.exe next to rustwm.exe."),
+            );
+            None
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -104,7 +117,11 @@ fn run(args: Args) -> anyhow::Result<()> {
 
     let config_path = args.config.unwrap_or_else(rwm_config::default_path);
     let (loaded, config_error) = load_config(&config_path);
-    apply_bindings(&loaded);
+    if loaded.has_old_bindings {
+        tracing::warn!(
+            "[bindings] and [modes] in rustwm.toml are ignored; key bindings live in kerys.toml now"
+        );
+    }
     rwm_win32::set_config_path(config_path.clone());
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -120,7 +137,7 @@ fn run(args: Args) -> anyhow::Result<()> {
 
     let verifier = spawn_verifier(tx.clone())?;
     let shared = Arc::new(ipc::Shared::new(tx));
-    shared.set_config(&config_path, &loaded.bindings);
+    shared.set_config(&config_path);
     {
         let shared = shared.clone();
         std::thread::Builder::new()
@@ -142,9 +159,10 @@ fn run(args: Args) -> anyhow::Result<()> {
     if let Some(e) = config_error {
         rwm_win32::notify("rustWM config error", &e);
     }
+    // After the pipe is up, so the daemon's first keypress reaches us.
+    let hotkeys = start_hotkeys(loaded.hotkeys.as_deref());
     tracing::info!("rustWM running; Win+Ctrl+Shift+Q, `rwm stop` or Ctrl+C to quit");
 
-    let mut mode = wm.mode().to_string();
     for event in rx {
         let request = match &event {
             Event::Request { id, .. } => Some(*id),
@@ -154,8 +172,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         if flow == Flow::Reload {
             match rwm_config::load(&config_path) {
                 Ok(loaded) => {
-                    apply_bindings(&loaded);
-                    shared.set_config(&config_path, &loaded.bindings);
+                    shared.set_config(&config_path);
                     wm.set_settings(loaded.settings);
                     tracing::info!("config reloaded");
                 }
@@ -164,10 +181,6 @@ fn run(args: Args) -> anyhow::Result<()> {
                     rwm_win32::notify("rustWM config error", &e.to_string());
                 }
             }
-        }
-        if wm.mode() != mode {
-            mode = wm.mode().to_string();
-            rwm_win32::set_mode(&mode);
         }
         shared.publish(wm.snapshot());
         if wm.take_verify_request() {
@@ -181,6 +194,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         }
     }
     wm.restore();
+    drop(hotkeys);
     events.stop();
     tracing::info!("rustWM stopped");
     Ok(())

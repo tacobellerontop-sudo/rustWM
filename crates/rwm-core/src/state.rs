@@ -10,8 +10,6 @@ use crate::layout::LayoutKind;
 pub struct State {
     pub focused_monitor: usize,
     pub focused_window: Option<WindowState>,
-    /// The active key-binding mode (`default` normally).
-    pub mode: String,
     /// The special workspace currently shown, if any.
     pub special: Option<String>,
     pub monitors: Vec<MonitorState>,
@@ -52,7 +50,7 @@ impl State {
     /// Which subscription topics differ between `old` and `self`.
     ///
     /// - `focus`: the focused window or monitor changed
-    /// - `workspace`: active workspaces, layouts, the mode or the shown
+    /// - `workspace`: active workspaces, layouts or the shown
     ///   special workspace changed
     /// - `window`: windows opened, closed, moved between workspaces or retitled
     pub fn changes(&self, old: &State) -> Vec<&'static str> {
@@ -68,7 +66,6 @@ impl State {
         }
         type Shape<'a> = (
             Vec<(&'a str, &'a str, Vec<(&'a str, LayoutKind)>)>,
-            &'a str,
             Option<&'a str>,
         );
         fn ws_shape(s: &State) -> Shape<'_> {
@@ -84,7 +81,7 @@ impl State {
                     (m.id.as_str(), m.active_workspace.as_str(), layouts)
                 })
                 .collect();
-            (monitors, s.mode.as_str(), s.special.as_deref())
+            (monitors, s.special.as_deref())
         }
         if ws_shape(self) != ws_shape(old) {
             topics.push("workspace");

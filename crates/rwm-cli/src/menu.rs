@@ -60,6 +60,7 @@ enum Item {
     Restart,
     EditConfig,
     CheckConfig,
+    EditKeys,
     Keybindings,
     Autostart(bool),
     AddToPath,
@@ -73,7 +74,12 @@ fn items(running: bool) -> Vec<Item> {
     } else {
         vec![Item::Start]
     };
-    items.extend([Item::EditConfig, Item::CheckConfig, Item::Keybindings]);
+    items.extend([
+        Item::EditConfig,
+        Item::CheckConfig,
+        Item::EditKeys,
+        Item::Keybindings,
+    ]);
     items.push(Item::Autostart(!autostart_on().unwrap_or(false)));
     if in_path() == Some(false) {
         items.push(Item::AddToPath);
@@ -90,6 +96,7 @@ impl Item {
             Item::Restart => "Restart rustWM",
             Item::EditConfig => "Edit config (changes apply when you save)",
             Item::CheckConfig => "Check config for errors",
+            Item::EditKeys => "Edit keybindings (kerys.toml)",
             Item::Keybindings => "Show keybindings",
             Item::Autostart(true) => "Start rustWM when I log in",
             Item::Autostart(false) => "Don't start rustWM when I log in",
@@ -120,9 +127,29 @@ impl Item {
                 println!("  {}: OK", config.display());
                 Ok(())
             }
-            Item::Keybindings => {
-                show_bindings(config);
+            Item::EditKeys => {
+                let keys = kerys_config_path();
+                if !keys.exists() {
+                    anyhow::bail!(
+                        "{} does not exist yet; start rustWM once and kerys writes it",
+                        keys.display()
+                    );
+                }
+                open(&keys)?;
+                println!("  Opened {}", keys.display());
                 Ok(())
+            }
+            Item::Keybindings => {
+                let status = std::process::Command::new(kerys_path())
+                    .arg("bindings")
+                    .status();
+                match status {
+                    Ok(s) if s.success() => Ok(()),
+                    Ok(s) => anyhow::bail!("kerys bindings failed ({s})"),
+                    Err(e) => {
+                        anyhow::bail!("cannot run kerys ({e}); keep kerys.exe next to rwm.exe")
+                    }
+                }
             }
             Item::Autostart(on) => super::autostart(if on { "on" } else { "off" }),
             Item::AddToPath => add_to_path(),
@@ -186,31 +213,23 @@ fn summary() -> Option<String> {
     ))
 }
 
-fn show_bindings(config: &Path) {
-    let loaded = match rwm_config::load(config) {
-        Ok(l) => l,
-        Err(e) => {
-            println!("  {e}; showing the built-in defaults");
-            println!();
-            rwm_config::parse("").expect("empty config is valid")
-        }
-    };
-    let width = loaded
-        .bindings
-        .iter()
-        .map(|(c, _)| c.to_string().len())
-        .max()
-        .unwrap_or(0);
-    for (chord, command) in &loaded.bindings {
-        println!("  {:width$}  {command}", chord.to_string());
-    }
-    for (mode, bindings) in &loaded.modes {
-        println!();
-        println!("  In {mode} mode:");
-        for (chord, command) in bindings {
-            println!("  {:width$}  {command}", chord.to_string());
-        }
-    }
+/// kerys's config: `%USERPROFILE%\.config\kerys\kerys.toml`.
+fn kerys_config_path() -> PathBuf {
+    rwm_config::default_path()
+        .parent()
+        .and_then(Path::parent)
+        .map_or_else(PathBuf::new, Path::to_path_buf)
+        .join("kerys")
+        .join("kerys.toml")
+}
+
+/// kerys.exe next to rwm.exe, or else whatever is on PATH.
+fn kerys_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("kerys.exe")))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("kerys"))
 }
 
 #[cfg(windows)]

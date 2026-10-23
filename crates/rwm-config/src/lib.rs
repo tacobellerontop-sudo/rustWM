@@ -1,36 +1,32 @@
 //! rustWM configuration: the TOML schema, validation, defaults, and conversion
-//! into the core's [`Settings`] plus the key bindings.
+//! into the core's [`Settings`].
+//!
+//! Key bindings are not here: they live in kerys's own config.
 
-pub mod keys;
-
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rwm_core::Command;
 use rwm_core::layout::{Gaps, LayoutKind};
 use rwm_core::rules::{Rule, RuleAction};
-use rwm_core::wm::{DEFAULT_MODE, Settings};
+use rwm_core::wm::Settings;
 use rwm_core::workspace::{InsertPos, WorkspaceMode};
 use serde::Deserialize;
 
-pub use keys::{Chord, KeyError};
-
-/// The commented config written on first run. Its `[bindings]` table is the
-/// built-in key map.
+/// The commented config written on first run.
 pub const DEFAULT_CONFIG: &str = include_str!("default.toml");
 
-/// A binding value that removes a default binding.
-const UNBIND: &str = "none";
+/// The hotkey daemon rustWM starts unless `general.hotkeys` says otherwise.
+pub const DEFAULT_HOTKEYS: &str = "kerys.exe";
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub general: General,
     pub gaps: GapsConfig,
-    pub bindings: BTreeMap<String, String>,
-    /// Extra binding modes: mode name -> chord -> command.
-    pub modes: BTreeMap<String, BTreeMap<String, String>>,
     pub rules: Vec<RuleConfig>,
+    /// Key bindings from before they moved to kerys. Accepted so old configs
+    /// still load (kerys copies them on its first run), but unused.
+    pub bindings: Option<toml::Value>,
+    pub modes: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -43,6 +39,9 @@ pub struct General {
     /// Command line launched by the `terminal` command. `None` falls back to
     /// `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
+    /// Hotkey daemon started with rustWM and stopped when it quits. Empty to
+    /// start none.
+    pub hotkeys: String,
 }
 
 impl Default for General {
@@ -54,6 +53,7 @@ impl Default for General {
             workspaces: s.workspaces,
             workspace_mode: s.workspace_mode,
             terminal: None,
+            hotkeys: DEFAULT_HOTKEYS.into(),
         }
     }
 }
@@ -97,10 +97,11 @@ pub struct MatchConfig {
 #[derive(Debug, Clone)]
 pub struct Loaded {
     pub settings: Settings,
-    /// Bindings of the default mode.
-    pub bindings: Vec<(Chord, String)>,
-    /// Bindings of every other mode, by mode name.
-    pub modes: Vec<(String, Vec<(Chord, String)>)>,
+    /// Command line of the hotkey daemon to start, if any.
+    pub hotkeys: Option<String>,
+    /// The file still has `[bindings]` or `[modes]`, which rustWM ignores now
+    /// that kerys handles keys.
+    pub has_old_bindings: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,47 +117,6 @@ pub enum ConfigError {
     Parse(String),
     #[error("invalid config:\n  {}", .0.join("\n  "))]
     Invalid(Vec<String>),
-}
-
-fn default_config() -> Config {
-    toml::from_str(DEFAULT_CONFIG).expect("default config parses")
-}
-
-/// The built-in key map, as written in [`DEFAULT_CONFIG`].
-pub fn default_bindings() -> Vec<(Chord, String)> {
-    default_config()
-        .bindings
-        .iter()
-        .map(|(k, c)| (k.parse().expect("default binding parses"), c.clone()))
-        .collect()
-}
-
-/// Parses one table of bindings, reporting problems under `section`.
-fn parse_bindings(
-    section: &str,
-    table: &BTreeMap<String, String>,
-    into: &mut BTreeMap<Chord, String>,
-    errors: &mut Vec<String>,
-) {
-    for (key, command) in table {
-        let chord = match key.parse::<Chord>() {
-            Ok(c) => c,
-            Err(e) => {
-                errors.push(format!("{section}.\"{key}\": {e}"));
-                continue;
-            }
-        };
-        if command.trim() == UNBIND {
-            into.remove(&chord);
-            continue;
-        }
-        match command.parse::<Command>() {
-            Ok(_) => {
-                into.insert(chord, command.trim().to_string());
-            }
-            Err(e) => errors.push(format!("{section}.\"{key}\": {e}")),
-        }
-    }
 }
 
 /// `%USERPROFILE%\.config\rustwm\rustwm.toml` (or `$HOME/...` elsewhere).
@@ -229,40 +189,6 @@ impl Config {
             errors.push("gaps: inner and outer must not be negative".into());
         }
 
-        let mut bindings: BTreeMap<Chord, String> = default_bindings().into_iter().collect();
-        parse_bindings("bindings", &self.bindings, &mut bindings, &mut errors);
-
-        // User modes replace built-in modes of the same name.
-        let mut mode_tables = default_config().modes;
-        mode_tables.extend(self.modes);
-        let mut modes = Vec::new();
-        for (name, table) in &mode_tables {
-            let section = format!("modes.{name}");
-            if name == DEFAULT_MODE {
-                errors.push(format!("{section}: the default mode is [bindings]"));
-                continue;
-            }
-            let mut map = BTreeMap::new();
-            parse_bindings(&section, table, &mut map, &mut errors);
-            if !map.is_empty() && !map.values().any(|c| c == &format!("mode {DEFAULT_MODE}")) {
-                errors.push(format!(
-                    "{section}: needs a binding to \"mode {DEFAULT_MODE}\""
-                ));
-            }
-            modes.push((name.clone(), map.into_iter().collect::<Vec<_>>()));
-        }
-        // Every `mode <name>` must name a mode that exists.
-        let all_commands = bindings
-            .values()
-            .chain(modes.iter().flat_map(|(_, b)| b.iter().map(|(_, c)| c)));
-        for command in all_commands {
-            if let Ok(Command::Mode(m)) = command.parse::<Command>() {
-                if m != DEFAULT_MODE && !modes.iter().any(|(n, _)| *n == m) {
-                    errors.push(format!("`{command}`: there is no [modes.{m}]"));
-                }
-            }
-        }
-
         let mut rules = Vec::new();
         for (i, r) in self.rules.iter().enumerate() {
             let n = i + 1;
@@ -309,8 +235,8 @@ impl Config {
                 terminal: self.general.terminal.map(|t| t.trim().to_string()),
                 rules,
             },
-            bindings: bindings.into_iter().collect(),
-            modes,
+            hotkeys: Some(self.general.hotkeys.trim().to_string()).filter(|h| !h.is_empty()),
+            has_old_bindings: self.bindings.is_some() || self.modes.is_some(),
         })
     }
 }
@@ -331,15 +257,8 @@ mod tests {
         let loaded = parse(DEFAULT_CONFIG).unwrap();
         assert_eq!(loaded.settings.workspaces.len(), 9);
         assert_eq!(loaded.settings.rules.len(), 3);
-        assert_eq!(loaded.bindings.len(), default_bindings().len());
-    }
-
-    #[test]
-    fn default_bindings_are_valid_commands() {
-        for (chord, cmd) in default_bindings() {
-            cmd.parse::<Command>()
-                .unwrap_or_else(|e| panic!("{chord}: {e}"));
-        }
+        assert_eq!(loaded.hotkeys.as_deref(), Some(DEFAULT_HOTKEYS));
+        assert!(!loaded.has_old_bindings);
     }
 
     #[test]
@@ -348,7 +267,7 @@ mod tests {
         assert_eq!(loaded.settings.default_layout, LayoutKind::Dwindle);
         assert_eq!(loaded.settings.terminal, None);
         assert_eq!(loaded.settings.gaps, Gaps::default());
-        assert_eq!(loaded.bindings.len(), default_bindings().len());
+        assert_eq!(loaded.hotkeys.as_deref(), Some(DEFAULT_HOTKEYS));
     }
 
     #[test]
@@ -361,16 +280,12 @@ mod tests {
             workspaces = ["web", "code"]
             workspace_mode = "global"
             terminal = "wezterm-gui.exe"
+            hotkeys = ""
 
             [gaps]
             inner = 4
             outer = 0
             smart = false
-
-            [bindings]
-            "win+t" = "exec wezterm-gui.exe start --cwd ~"
-            "win+h" = "none"
-            "win+enter" = "exec alacritty.exe"
 
             [[rules]]
             match = { exe = "Spotify.exe", class = "Chrome_WidgetWin_1" }
@@ -397,19 +312,7 @@ mod tests {
             s.rules[0].actions,
             vec![RuleAction::Workspace("code".into()), RuleAction::Float]
         );
-
-        let find = |k: &str| {
-            let chord: Chord = k.parse().unwrap();
-            loaded
-                .bindings
-                .iter()
-                .find(|(c, _)| *c == chord)
-                .map(|(_, cmd)| cmd.as_str())
-        };
-        assert_eq!(find("win+t"), Some("exec wezterm-gui.exe start --cwd ~"));
-        assert_eq!(find("win+h"), None);
-        assert_eq!(find("win+enter"), Some("exec alacritty.exe"));
-        assert_eq!(find("win+j"), Some("focus down"));
+        assert_eq!(loaded.hotkeys, None);
     }
 
     #[test]
@@ -436,10 +339,6 @@ mod tests {
             [gaps]
             inner = -1
 
-            [bindings]
-            "win+banana" = "focus left"
-            "win+x" = "fly away"
-
             [[rules]]
             match = {}
             actions = ["explode"]
@@ -451,8 +350,6 @@ mod tests {
             "one word",
             "terminal",
             "negative",
-            "banana",
-            "fly",
             "explode",
             "at least one of",
         ] {
@@ -461,45 +358,21 @@ mod tests {
     }
 
     #[test]
-    fn default_resize_mode() {
-        let loaded = parse("").unwrap();
-        let (name, binds) = &loaded.modes[0];
-        assert_eq!(name, "resize");
-        assert!(
-            binds
-                .iter()
-                .any(|(c, cmd)| c.to_string() == "escape" && cmd == "mode default")
-        );
-    }
-
-    #[test]
-    fn custom_modes_are_validated() {
+    fn old_bindings_are_accepted_and_ignored() {
         let loaded = parse(
             r#"
             [bindings]
+            "win+h" = "focus left"
             "win+m" = "mode move"
             [modes.move]
-            "h" = "move left"
             "escape" = "mode default"
             "#,
         )
         .unwrap();
-        assert_eq!(loaded.modes.len(), 2);
-
-        let errors = invalid(
-            r#"
-            [bindings]
-            "win+m" = "mode nowhere"
-            [modes.trap]
-            "h" = "focus left"
-            [modes.default]
-            "x" = "close"
-            "#,
-        )
-        .join("\n");
-        assert!(errors.contains("no [modes.nowhere]"), "{errors}");
-        assert!(errors.contains("modes.trap: needs a binding"), "{errors}");
-        assert!(errors.contains("default mode is [bindings]"), "{errors}");
+        assert!(loaded.has_old_bindings);
+        assert!(
+            parse("[general]\nhotkeys = \"whkd.exe\"").unwrap().hotkeys == Some("whkd.exe".into())
+        );
     }
 
     #[test]

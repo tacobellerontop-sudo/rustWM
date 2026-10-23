@@ -51,9 +51,6 @@ impl Default for Settings {
 
 const FALLBACK_TERMINALS: &[&str] = &["wt.exe", "cmd.exe"];
 
-/// The name of the normal key-binding mode.
-pub const DEFAULT_MODE: &str = "default";
-
 /// A shown special workspace covers this fraction of the work area.
 const SPECIAL_SCALE: f32 = 0.9;
 
@@ -97,7 +94,6 @@ pub struct Wm<P: Platform> {
     special_shown: Option<(usize, usize)>,
     /// Focus is inside the shown special workspace.
     special_focused: bool,
-    mode: String,
     /// Windows rustWM itself hid. They must be shown again on exit or crash,
     /// and their `WindowHidden` events must not be read as closes.
     hidden_by_us: BTreeSet<WindowHandle>,
@@ -128,7 +124,6 @@ impl<P: Platform> Wm<P> {
             specials: Vec::new(),
             special_shown: None,
             special_focused: false,
-            mode: DEFAULT_MODE.into(),
             hidden_by_us: BTreeSet::new(),
             ignored: BTreeSet::new(),
             applied: HashMap::new(),
@@ -306,10 +301,6 @@ impl<P: Platform> Wm<P> {
                 }
             }
             Command::ToggleSpecial(name) => self.toggle_special(&name),
-            Command::Mode(mode) => {
-                info!(%mode, "binding mode");
-                self.mode = mode;
-            }
             Command::Reload => return Flow::Reload,
             Command::Restore => self.restore(),
             Command::Quit => {
@@ -406,10 +397,6 @@ impl<P: Platform> Wm<P> {
         self.focused_monitor
     }
 
-    pub fn mode(&self) -> &str {
-        &self.mode
-    }
-
     /// Every window on screen: visible workspaces, then the shown special one.
     pub fn managed(&self) -> impl Iterator<Item = WindowHandle> + '_ {
         let special = self.special_shown.map(|(i, _)| &self.specials[i]);
@@ -469,7 +456,6 @@ impl<P: Platform> Wm<P> {
                 let ws = self.ws(self.current_loc());
                 window(ws, h)
             }),
-            mode: self.mode.clone(),
             special: self
                 .special_shown
                 .map(|(i, _)| self.specials[i].name.clone()),
