@@ -231,6 +231,7 @@ name = "rustwm"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "clap",
  "rwm-config",
  "rwm-core",
  "rwm-win32",
@@ -245,6 +246,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rwm-ipc",
+ "rwm-win32",
 ]
 
 [[package]]

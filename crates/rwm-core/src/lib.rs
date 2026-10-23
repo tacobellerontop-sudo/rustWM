@@ -4,8 +4,10 @@
 //! manager talks to the OS only through the [`Platform`] trait, so the whole
 //! core can be driven by [`fake::FakePlatform`] in tests on any OS.
 
+pub mod cmdline;
 pub mod event;
 pub mod geometry;
+pub mod layout;
 pub mod platform;
 pub mod window;
 pub mod wm;

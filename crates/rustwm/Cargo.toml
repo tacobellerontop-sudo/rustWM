@@ -11,6 +11,7 @@ repository.workspace = true
 rwm-core.workspace = true
 rwm-config.workspace = true
 anyhow.workspace = true
+clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

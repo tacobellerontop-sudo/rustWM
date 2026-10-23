@@ -16,5 +16,8 @@ rwm-ipc.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+rwm-win32.workspace = true
+
 [lints]
 workspace = true
