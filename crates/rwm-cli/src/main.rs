@@ -1,6 +1,8 @@
 //! `rwm`: start, stop and control the rustWM daemon over its named pipe.
 
-use std::io::ErrorKind;
+mod menu;
+
+use std::io::{ErrorKind, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -14,7 +16,8 @@ use rwm_ipc::{Client, Request, Response};
     name = "rwm",
     version,
     about = "Control the rustWM tiling window manager",
-    after_help = "Any other command is sent to rustWM, e.g. `rwm focus left`, `rwm workspace 3`, \
+    after_help = "Run rwm with no arguments for a menu.\n\n\
+                  Any other command is sent to rustWM, e.g. `rwm focus left`, `rwm workspace 3`, \
                   `rwm layout master`. They are the same commands as in [bindings]."
 )]
 struct Cli {
@@ -69,6 +72,8 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
+        // Double-clicked or run bare in a console: show the menu.
+        None if std::io::stdin().is_terminal() => menu::run(),
         None => {
             println!("rwm {}: try `rwm --help`", env!("CARGO_PKG_VERSION"));
             Ok(())

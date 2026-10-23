@@ -11,6 +11,8 @@ pub enum RuleAction {
     Float,
     /// Never manage the window.
     Ignore,
+    /// Always tile the window, even if it looks fixed-size.
+    Tile,
     /// Open the window on the named workspace of its monitor.
     Workspace(String),
 }
@@ -25,7 +27,7 @@ pub enum RuleError {
         #[source]
         source: regex::Error,
     },
-    #[error("unknown rule action `{0}` (expected float, ignore or workspace <name>)")]
+    #[error("unknown rule action `{0}` (expected float, tile, ignore or workspace <name>)")]
     Action(String),
 }
 
@@ -55,6 +57,7 @@ impl RuleAction {
         match s.split_once(char::is_whitespace) {
             None if s == "float" => Ok(Self::Float),
             None if s == "ignore" => Ok(Self::Ignore),
+            None if s == "tile" => Ok(Self::Tile),
             Some(("workspace", name)) if !name.trim().is_empty() => {
                 Ok(Self::Workspace(name.trim().into()))
             }
@@ -99,6 +102,7 @@ impl Rule {
 pub struct Verdict {
     pub ignore: bool,
     pub float: bool,
+    pub tile: bool,
     pub workspace: Option<String>,
 }
 
@@ -109,6 +113,7 @@ pub fn evaluate(rules: &[Rule], w: &WindowInfo) -> Verdict {
             match action {
                 RuleAction::Float => v.float = true,
                 RuleAction::Ignore => v.ignore = true,
+                RuleAction::Tile => v.tile = true,
                 RuleAction::Workspace(name) => v.workspace = Some(name.clone()),
             }
         }
@@ -130,6 +135,7 @@ mod tests {
             rect: Rect::default(),
             minimized: false,
             manageable: true,
+            resizable: true,
         }
     }
 
@@ -179,6 +185,7 @@ mod tests {
             Verdict {
                 ignore: false,
                 float: true,
+                tile: false,
                 workspace: Some("3".into())
             }
         );

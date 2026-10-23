@@ -252,7 +252,7 @@ fn dragged_window_snaps_back() {
     let mut wm = wm_with(2);
     let slot = rect(&wm, 2);
     wm.platform_mut()
-        .place(W(2), Rect::new(1000, 300, 200, 200));
+        .place(W(2), Rect::new(1000, 300, slot.w, slot.h));
     wm.handle(Event::WindowMoveEnded(W(2)));
     assert_eq!(rect(&wm, 2), slot);
 }
@@ -346,8 +346,9 @@ mod dual_monitor {
     #[test]
     fn drop_on_other_monitor_transfers() {
         let mut wm = wm();
+        let size = rect(&wm, 1);
         wm.platform_mut()
-            .place(W(1), Rect::new(3000, 500, 400, 400));
+            .place(W(1), Rect::new(3000, 500, size.w, size.h));
         wm.handle(Event::WindowMoveEnded(W(1)));
         assert_eq!(rect(&wm, 2), Rect::new(0, 0, 1920, 1040));
         // Dropped onto window 3, so it takes 3's slot and 3 moves along.

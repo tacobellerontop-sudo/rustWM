@@ -37,7 +37,11 @@ cargo build --release              # or download a release zip
 rwm autostart on                   # start at login
 ```
 
-Put both `.exe` files somewhere on your `PATH`. Logs go to
+Or just double-click `rwm.exe` (or run it with no arguments) for a menu: start/stop,
+edit and check the config, see your keybindings, autostart, and "Add rwm to PATH" so
+`rwm` works without `.\` in any new terminal.
+
+Keep both `.exe` files in the same folder. Logs go to
 `%LOCALAPPDATA%\rustwm\rustwm.log`; run `rustwm.exe` directly to see them in a console.
 
 On first run rustWM writes a commented config to
@@ -61,8 +65,35 @@ smart = true
 
 [[rules]]
 match = { exe = "Spotify.exe" }  # exe/class: whole-value regex; title: regex search
-actions = ["workspace 9"]        # float | ignore | workspace <name>
+actions = ["workspace 9"]        # float | ignore | tile | workspace <name>
 ```
+
+### Windows that can't be resized
+
+Some windows (launchers like the Riot Client, dialogs) have a fixed or minimum size.
+rustWM floats them on its own: windows without a sizing border float when they open,
+and a tiled window that doesn't take the size it was given is floated, centred, about a
+second later. Riot Client and the League client float by default. To change what
+happens to an app, add a rule:
+
+```toml
+[[rules]]
+match = { exe = "SomeLauncher.exe" }
+actions = ["float"]              # always float it
+
+[[rules]]
+match = { exe = "MyEditor.exe" }
+actions = ["tile"]               # always tile it, even if it looks fixed-size
+```
+
+Tiling a floated window yourself (Win + F) also keeps it tiled.
+
+### Resizing with the mouse
+
+Drag the edge of a tiled window to resize it; its neighbours follow and the split is
+remembered. Dragging from the title bar moves it instead: drop it on another window to
+swap them, or on another monitor to move it there. Floating windows move and resize
+freely.
 
 ### Default keys
 

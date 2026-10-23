@@ -118,6 +118,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         }
     };
 
+    let verifier = spawn_verifier(tx.clone())?;
     let shared = Arc::new(ipc::Shared::new(tx));
     shared.set_config(&config_path, &loaded.bindings);
     {
@@ -135,6 +136,9 @@ fn run(args: Args) -> anyhow::Result<()> {
     let mut wm = Wm::with_settings(rwm_win32::Win32Platform::new(), loaded.settings);
     wm.start()?;
     shared.publish(wm.snapshot());
+    if wm.take_verify_request() {
+        let _ = verifier.send(());
+    }
     if let Some(e) = config_error {
         rwm_win32::notify("rustWM config error", &e);
     }
@@ -166,6 +170,9 @@ fn run(args: Args) -> anyhow::Result<()> {
             rwm_win32::set_mode(&mode);
         }
         shared.publish(wm.snapshot());
+        if wm.take_verify_request() {
+            let _ = verifier.send(());
+        }
         if let Some(id) = request {
             shared.finished(id);
         }
@@ -177,6 +184,38 @@ fn run(args: Args) -> anyhow::Result<()> {
     events.stop();
     tracing::info!("rustWM stopped");
     Ok(())
+}
+
+/// Sends [`rwm_core::Event::Verify`] once windows have been left alone for a
+/// moment after being moved, so the core can float the ones that would not
+/// take their tile size.
+#[cfg(windows)]
+fn spawn_verifier(
+    events: std::sync::mpsc::Sender<rwm_core::Event>,
+) -> std::io::Result<std::sync::mpsc::Sender<()>> {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::Duration;
+
+    /// Windows resize asynchronously; give them this long to settle.
+    const SETTLE: Duration = Duration::from_millis(750);
+    let (kick, kicks) = channel::<()>();
+    std::thread::Builder::new()
+        .name("verify".into())
+        .spawn(move || {
+            while kicks.recv().is_ok() {
+                loop {
+                    match kicks.recv_timeout(SETTLE) {
+                        Ok(()) => continue,
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                if events.send(rwm_core::Event::Verify).is_err() {
+                    return;
+                }
+            }
+        })?;
+    Ok(kick)
 }
 
 #[cfg(not(windows))]

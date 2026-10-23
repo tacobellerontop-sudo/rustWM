@@ -27,6 +27,9 @@ pub enum Event {
         id: u64,
         command: String,
     },
+    /// Time to check that recently moved windows took the size they were
+    /// given. Sent by the daemon shortly after [`crate::Wm::take_verify_request`].
+    Verify,
     /// Stop the window manager and restore all windows.
     Shutdown,
 }

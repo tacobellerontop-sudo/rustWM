@@ -202,6 +202,8 @@ pub(crate) fn info(h: HWND) -> Option<WindowInfo> {
         // SAFETY: IsIconic accepts any handle.
         minimized: unsafe { IsIconic(h).as_bool() },
         manageable,
+        // SAFETY: GetWindowLongPtrW accepts any handle.
+        resizable: unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_THICKFRAME.0 != 0,
     })
 }
 

@@ -104,6 +104,11 @@ pub struct Wm<P: Platform> {
     /// moved again and geometric focus works from the layout, not the OS.
     applied: HashMap<WindowHandle, Rect>,
     meta: HashMap<WindowHandle, Meta>,
+    /// Windows that must tile even if they look fixed-size (a `tile` rule, or
+    /// the user tiled them by hand).
+    force_tiled: BTreeSet<WindowHandle>,
+    /// Windows were moved and should be checked with [`Event::Verify`].
+    verify_pending: bool,
 }
 
 impl<P: Platform> Wm<P> {
@@ -125,6 +130,8 @@ impl<P: Platform> Wm<P> {
             ignored: BTreeSet::new(),
             applied: HashMap::new(),
             meta: HashMap::new(),
+            force_tiled: BTreeSet::new(),
+            verify_pending: false,
         }
     }
 
@@ -147,7 +154,7 @@ impl<P: Platform> Wm<P> {
                 continue;
             }
             let monitor = self.monitor_at(w.rect).unwrap_or(0);
-            let verdict = rules::evaluate(&self.settings.rules, &w);
+            let verdict = self.verdict_for(&w);
             debug!(handle = ?w.handle, exe = %w.exe, title = %w.title, ?verdict, "adopting window");
             if self
                 .place(w.handle, monitor, &verdict, InsertPos::End)
@@ -218,6 +225,7 @@ impl<P: Platform> Wm<P> {
                     Err(e) => warn!(command = %cmd, error = %e, "invalid command"),
                 }
             }
+            Event::Verify => self.verify_sizes(),
             Event::Shutdown => {
                 self.restore();
                 return Flow::Exit;
@@ -480,7 +488,7 @@ impl<P: Platform> Wm<P> {
         if !w.manageable || w.minimized || self.monitors.is_empty() {
             return;
         }
-        let mut verdict = rules::evaluate(&self.settings.rules, &w);
+        let mut verdict = self.verdict_for(&w);
         debug!(handle = ?h, exe = %w.exe, title = %w.title, ?verdict, "managing window");
         if verdict.ignore {
             self.ignored.insert(h);
@@ -499,6 +507,108 @@ impl<P: Platform> Wm<P> {
                 self.ws_mut(loc).focused = Some(h);
             }
         }
+    }
+
+    /// Rules plus fixed-size detection: a window without a sizing border
+    /// floats unless a `tile` rule says otherwise.
+    fn verdict_for(&self, w: &WindowInfo) -> Verdict {
+        let mut v = rules::evaluate(&self.settings.rules, w);
+        if !w.resizable && !v.tile && !v.float {
+            debug!(handle = ?w.handle, exe = %w.exe, "fixed-size window, floating it");
+            v.float = true;
+        }
+        v
+    }
+
+    /// Floats tiled windows that did not take the size they were given (they
+    /// enforce a minimum size or ignore resizing), unless a rule or the user
+    /// insists they tile.
+    fn verify_sizes(&mut self) {
+        /// Pixels of slack before a window counts as refusing its slot.
+        const TOLERANCE: i32 = 8;
+        let mut refused = Vec::new();
+        for h in self.managed().collect::<Vec<_>>() {
+            let Some(slot) = self.applied.get(&h).copied() else {
+                continue;
+            };
+            if self.force_tiled.contains(&h) {
+                continue;
+            }
+            let Some(loc) = self.locate(h) else {
+                continue;
+            };
+            if self.ws(loc).is_floating(h) || self.ws(loc).fullscreen == Some(h) {
+                continue;
+            }
+            if let Some(w) = self.platform.window_info(h) {
+                if w.rect.w > slot.w + TOLERANCE || w.rect.h > slot.h + TOLERANCE {
+                    refused.push((h, loc, w));
+                }
+            }
+        }
+        for (h, loc, w) in refused {
+            info!(handle = ?h, exe = %w.exe, title = %w.title, slot = ?self.applied.get(&h), actual = ?w.rect,
+                "window refused its tile size, floating it");
+            let ws = self.ws_mut(loc);
+            ws.tiled.retain(|x| *x != h);
+            ws.floating.push(h);
+            self.applied.remove(&h);
+            // Keep its own size, centred on its monitor.
+            let mi = match loc {
+                Loc::Ws { monitor, .. } => monitor,
+                Loc::Special(_) => self.special_shown.map_or(self.focused_monitor, |(_, m)| m),
+            };
+            let area = self.monitors[mi].info.work_area;
+            let (ww, wh) = (w.rect.w.min(area.w), w.rect.h.min(area.h));
+            let rect = Rect::new(
+                area.x + (area.w - ww) / 2,
+                area.y + (area.h - wh) / 2,
+                ww,
+                wh,
+            );
+            if let Err(e) = self.platform.set_rects(&[(h, rect)]) {
+                warn!(error = %e, "could not place floating window");
+            }
+        }
+    }
+
+    /// Whether windows were moved since the last call, so the caller should
+    /// send [`Event::Verify`] once they have had time to resize.
+    pub fn take_verify_request(&mut self) -> bool {
+        std::mem::take(&mut self.verify_pending)
+    }
+
+    /// The area and gaps a workspace is laid out in.
+    fn layout_area(&self, loc: Loc) -> Option<(Rect, Gaps)> {
+        let (mi, special) = match loc {
+            Loc::Ws { monitor, .. } => (monitor, false),
+            Loc::Special(_) => (self.special_shown?.1, true),
+        };
+        let m = self.monitors.get(mi)?;
+        let gaps = self.settings.gaps.scaled(m.info.scale);
+        let area = if special {
+            special_overlay(m.info.work_area)
+        } else {
+            m.info.work_area
+        };
+        Some((area, gaps))
+    }
+
+    /// The user resized tiled window `h` to `rect` with the mouse: change the
+    /// layout ratios so its slot follows. Returns false if it could not.
+    fn resize_to(&mut self, h: WindowHandle, loc: Loc, rect: Rect) -> bool {
+        let Some((area, gaps)) = self.layout_area(loc) else {
+            return false;
+        };
+        let ws = self.ws_mut(loc);
+        if ws.fullscreen.is_some() {
+            return false;
+        }
+        let Some(index) = ws.index_of(h) else {
+            return false;
+        };
+        let (layout, count) = (ws.layout, ws.tiled.len());
+        layout.fit(&mut ws.ratios, index, count, area, gaps, rect)
     }
 
     /// Finds or creates the special workspace called `name`.
@@ -549,6 +659,9 @@ impl<P: Platform> Wm<P> {
             }),
             None => active,
         };
+        if verdict.tile {
+            self.force_tiled.insert(h);
+        }
         self.ws_mut(loc).add(h, verdict.float, pos);
         if !self.is_visible(loc) {
             self.hide(h);
@@ -561,6 +674,7 @@ impl<P: Platform> Wm<P> {
             self.ws_mut(loc).remove(h);
             self.applied.remove(&h);
             self.meta.remove(&h);
+            self.force_tiled.remove(&h);
         }
     }
 
@@ -568,11 +682,23 @@ impl<P: Platform> Wm<P> {
     /// tiled window swaps with it; dropped on another monitor it moves there;
     /// otherwise it snaps back into its slot.
     fn window_dropped(&mut self, h: WindowHandle) {
+        /// A size change bigger than this means the user resized, not moved.
+        const RESIZE_THRESHOLD: i32 = 10;
         let Some(loc) = self.locate(h) else {
             return;
         };
         let floating = self.ws(loc).is_floating(h);
-        self.applied.remove(&h);
+        let slot = self.applied.remove(&h);
+        if let (false, Some(slot), Some(w)) = (floating, slot, self.platform.window_info(h)) {
+            let resized = (w.rect.w - slot.w).abs() > RESIZE_THRESHOLD
+                || (w.rect.h - slot.h).abs() > RESIZE_THRESHOLD;
+            if resized {
+                if self.resize_to(h, loc, w.rect) {
+                    debug!(handle = ?h, rect = ?w.rect, "resized by mouse");
+                }
+                return;
+            }
+        }
         let point = self
             .platform
             .cursor_pos()
@@ -881,9 +1007,12 @@ impl<P: Platform> Wm<P> {
         if ws.is_floating(h) {
             ws.floating.retain(|x| *x != h);
             ws.insert(h, pos);
+            // The user wants it tiled: don't float it again if it looks fixed-size.
+            self.force_tiled.insert(h);
         } else {
             ws.tiled.retain(|x| *x != h);
             ws.floating.push(h);
+            self.force_tiled.remove(&h);
             self.applied.remove(&h);
             self.center_floating(h, mi);
         }
@@ -1019,12 +1148,7 @@ impl<P: Platform> Wm<P> {
         }
         if let Some((i, mi)) = self.special_shown {
             if let Some(m) = self.monitors.get(mi) {
-                let area = m.info.work_area;
-                let (w, h) = (
-                    (area.w as f32 * SPECIAL_SCALE) as i32,
-                    (area.h as f32 * SPECIAL_SCALE) as i32,
-                );
-                let overlay = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
+                let overlay = special_overlay(m.info.work_area);
                 let gaps = self.settings.gaps.scaled(m.info.scale);
                 slots.extend(arrange(&self.specials[i], overlay, overlay, gaps));
             }
@@ -1039,6 +1163,7 @@ impl<P: Platform> Wm<P> {
         for &(h, r) in &moves {
             self.applied.insert(h, r);
         }
+        self.verify_pending = true;
         if let Err(e) = self.platform.set_rects(&moves) {
             warn!(error = %e, "some windows could not be moved");
         }
@@ -1069,6 +1194,13 @@ impl<P: Platform> Wm<P> {
             }
         }
     }
+}
+
+/// Where a shown special workspace is laid out: the middle of the work area.
+fn special_overlay(area: Rect) -> Rect {
+    let w = (area.w as f32 * SPECIAL_SCALE) as i32;
+    let h = (area.h as f32 * SPECIAL_SCALE) as i32;
+    Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h)
 }
 
 /// The target rect of every tiled (and fullscreen) window of a workspace.

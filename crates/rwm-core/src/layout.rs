@@ -124,6 +124,66 @@ impl LayoutKind {
     }
 }
 
+impl LayoutKind {
+    /// The splits whose ratios move window `index`'s edges, in the order to
+    /// fit them (outer split first).
+    fn splits_for(self, index: usize, count: usize) -> Vec<usize> {
+        match self {
+            LayoutKind::Monocle => Vec::new(),
+            LayoutKind::Master => vec![0],
+            LayoutKind::Dwindle => {
+                let mut s = Vec::new();
+                if index > 0 {
+                    s.push(index - 1);
+                }
+                if index + 1 < count {
+                    s.push(index);
+                }
+                s
+            }
+        }
+    }
+
+    /// Adjusts `ratios` so window `index` comes as close as possible to
+    /// `target`: used when the user resizes a tiled window with the mouse.
+    /// Returns whether any ratio changed.
+    pub fn fit(
+        self,
+        ratios: &mut Ratios,
+        index: usize,
+        count: usize,
+        area: Rect,
+        gaps: Gaps,
+        target: Rect,
+    ) -> bool {
+        let before = ratios.clone();
+        let error = |ratios: &Ratios| {
+            let r = self.arrange(count, area, gaps, ratios)[index];
+            (r.x - target.x).abs()
+                + (r.y - target.y).abs()
+                + (r.right() - target.right()).abs()
+                + (r.bottom() - target.bottom()).abs()
+        };
+        // Two passes, because the outer split shifts the space the inner one divides.
+        for _ in 0..2 {
+            for split in self.splits_for(index, count) {
+                let mut best = (error(ratios), ratios.get(split));
+                let steps = ((MAX_RATIO - MIN_RATIO) / 0.0025) as usize;
+                for step in 0..=steps {
+                    let r = MIN_RATIO + step as f32 * 0.0025;
+                    ratios.set(split, r);
+                    let e = error(ratios);
+                    if e < best.0 {
+                        best = (e, r);
+                    }
+                }
+                ratios.set(split, best.1);
+            }
+        }
+        *ratios != before
+    }
+}
+
 impl std::str::FromStr for LayoutKind {
     type Err = ();
 
@@ -423,6 +483,44 @@ mod tests {
         assert_eq!(r.get(0), 0.4);
         assert!(!LayoutKind::Monocle.resize(&mut r, 0, 3, 0.1));
         assert!(!LayoutKind::Dwindle.resize(&mut r, 0, 1, 0.1));
+    }
+
+    #[test]
+    fn fit_follows_a_dragged_edge() {
+        // Two windows side by side; the user drags the left one's right edge
+        // from x=960 to x=1200.
+        let mut r = Ratios::default();
+        let target = Rect::new(0, 0, 1200, 1040);
+        assert!(LayoutKind::Dwindle.fit(&mut r, 0, 2, AREA, NO_GAPS, target));
+        let rects = dwindle(2, AREA, NO_GAPS, &r);
+        assert!((rects[0].w - 1200).abs() <= 5, "{rects:?}");
+
+        // Dragging the right window's left edge works too.
+        let mut r = Ratios::default();
+        LayoutKind::Dwindle.fit(&mut r, 1, 2, AREA, NO_GAPS, Rect::new(700, 0, 1220, 1040));
+        assert!((dwindle(2, AREA, NO_GAPS, &r)[1].x - 700).abs() <= 5);
+    }
+
+    #[test]
+    fn fit_moves_both_edges_of_a_middle_window() {
+        // Window 1 of 3 is the top-right one; drag its left and bottom edges.
+        // (Kept narrower than tall so dwindle still splits it top/bottom.)
+        let mut r = Ratios::default();
+        let target = Rect::new(900, 0, 1020, 700);
+        LayoutKind::Dwindle.fit(&mut r, 1, 3, AREA, NO_GAPS, target);
+        let got = dwindle(3, AREA, NO_GAPS, &r)[1];
+        assert!(
+            (got.x - 900).abs() <= 5 && (got.bottom() - 700).abs() <= 5,
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn fit_master_ratio_and_monocle_noop() {
+        let mut r = Ratios::default();
+        LayoutKind::Master.fit(&mut r, 2, 3, AREA, NO_GAPS, Rect::new(1300, 520, 620, 520));
+        assert!((master(3, AREA, NO_GAPS, &r)[2].x - 1300).abs() <= 5);
+        assert!(!LayoutKind::Monocle.fit(&mut r, 0, 2, AREA, NO_GAPS, Rect::new(0, 0, 10, 10)));
     }
 
     #[test]

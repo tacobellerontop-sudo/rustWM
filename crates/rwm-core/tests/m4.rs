@@ -169,7 +169,7 @@ fn dropping_a_window_on_another_swaps_them() {
     // 1 = left half, 2 = top right, 3 = bottom right. Drag 1 onto 3.
     wm.platform_mut().cursor = Some((1500, 800));
     wm.platform_mut()
-        .place(W(1), Rect::new(1300, 600, 500, 400));
+        .place(W(1), Rect::new(1100, 500, 960, 1040));
     wm.handle(Event::WindowMoveEnded(W(1)));
     assert_eq!(rect(&wm, 3), Rect::new(0, 0, 960, 1040));
     assert_eq!(rect(&wm, 1), Rect::new(960, 520, 960, 520));
@@ -179,7 +179,7 @@ fn dropping_a_window_on_another_swaps_them() {
 fn dropping_on_empty_space_snaps_back() {
     let mut wm = wm_with(2);
     wm.platform_mut().cursor = Some((100, 100));
-    wm.platform_mut().place(W(1), Rect::new(0, 0, 200, 200));
+    wm.platform_mut().place(W(1), Rect::new(40, 60, 960, 1040));
     wm.handle(Event::WindowMoveEnded(W(1)));
     assert_eq!(rect(&wm, 1), Rect::new(0, 0, 960, 1040));
 }

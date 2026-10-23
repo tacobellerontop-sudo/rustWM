@@ -327,7 +327,7 @@ mod tests {
     fn default_config_is_valid() {
         let loaded = parse(DEFAULT_CONFIG).unwrap();
         assert_eq!(loaded.settings.workspaces.len(), 9);
-        assert_eq!(loaded.settings.rules.len(), 2);
+        assert_eq!(loaded.settings.rules.len(), 3);
         assert_eq!(loaded.bindings.len(), default_bindings().len());
     }
 

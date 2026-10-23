@@ -99,7 +99,12 @@ smart = true   # no gaps when a workspace has a single window
 
 # Rules match windows by exe, class and/or title. exe and class must match the
 # whole value (case-insensitive regex); title is a regex searched anywhere.
-# Actions: "float", "ignore", "workspace <name>".
+# Actions: "float", "ignore", "tile", "workspace <name>".
+#
+# Windows that can't be resized (no sizing border, or they refuse the size
+# they are given, like launchers with a fixed minimum size) float on their
+# own. Add a "tile" rule to force such a window to tile anyway, or a "float"
+# rule for windows that resize but look wrong when tiled.
 
 [[rules]]
 match = { exe = "CalculatorApp.exe" }
@@ -107,6 +112,11 @@ actions = ["float"]
 
 [[rules]]
 match = { title = "^Picture-in-Picture$" }
+actions = ["float"]
+
+# Fixed-size launchers.
+[[rules]]
+match = { exe = 'RiotClientServices\.exe|Riot Client\.exe|LeagueClientUx\.exe' }
 actions = ["float"]
 
 # [[rules]]

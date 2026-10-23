@@ -30,6 +30,8 @@ pub struct FakePlatform {
     pub foreground: Option<WindowHandle>,
     pub calls: Vec<Call>,
     pub cursor: Option<(i32, i32)>,
+    /// Minimum sizes some windows insist on; `set_rects` will not go below.
+    pub min_size: BTreeMap<WindowHandle, (i32, i32)>,
     /// Command lines starting with any of these fail to spawn.
     pub failing_spawns: Vec<String>,
 }
@@ -75,6 +77,7 @@ impl FakePlatform {
                 rect: Rect::new(100, 100, 800, 600),
                 minimized: false,
                 manageable: true,
+                resizable: true,
             },
         );
         handle
@@ -131,7 +134,9 @@ impl Platform for FakePlatform {
     fn set_rects(&mut self, moves: &[(WindowHandle, Rect)]) -> Result<()> {
         self.calls.push(Call::SetRects(moves.to_vec()));
         for (handle, rect) in moves {
-            self.get_mut(*handle)?.rect = *rect;
+            let (min_w, min_h) = self.min_size.get(handle).copied().unwrap_or((0, 0));
+            let r = Rect::new(rect.x, rect.y, rect.w.max(min_w), rect.h.max(min_h));
+            self.get_mut(*handle)?.rect = r;
         }
         Ok(())
     }

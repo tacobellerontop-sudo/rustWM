@@ -18,6 +18,8 @@ mod platform;
 #[cfg(windows)]
 mod tray;
 #[cfg(windows)]
+pub mod user_path;
+#[cfg(windows)]
 mod window;
 
 #[cfg(windows)]
