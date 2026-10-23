@@ -53,6 +53,9 @@ smart = true   # no gaps when a workspace has a single window
 "win+equal" = "resize grow"
 "win+minus" = "resize shrink"
 "win+shift+r" = "reload"
+"win+alt+r" = "mode resize"
+"win+grave" = "toggle-special scratch"
+"win+shift+grave" = "move-to-workspace special:scratch"
 "win+ctrl+r" = "retile"
 "win+ctrl+shift+q" = "quit"
 "win+ctrl+left" = "focus-monitor left"
@@ -78,6 +81,21 @@ smart = true   # no gaps when a workspace has a single window
 "win+shift+8" = "move-to-workspace 8"
 "win+shift+9" = "move-to-workspace 9"
 # "win+t" = "exec wezterm-gui.exe start --cwd ~"
+
+# Binding modes (like Hyprland submaps): while a mode is active only its
+# bindings apply; other keys type normally. Every mode needs a way back to
+# "mode default".
+[modes.resize]
+"h" = "resize shrink"
+"l" = "resize grow"
+"k" = "resize shrink"
+"j" = "resize grow"
+"left" = "resize shrink"
+"right" = "resize grow"
+"up" = "resize shrink"
+"down" = "resize grow"
+"escape" = "mode default"
+"enter" = "mode default"
 
 # Rules match windows by exe, class and/or title. exe and class must match the
 # whole value (case-insensitive regex); title is a regex searched anywhere.

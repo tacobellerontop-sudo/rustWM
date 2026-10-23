@@ -4,14 +4,15 @@ use std::os::windows::process::CommandExt;
 use rwm_core::platform::Result;
 use rwm_core::{MonitorInfo, Platform, PlatformError, Rect, WindowHandle, WindowInfo};
 use tracing::{info, warn};
+use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, IsIconic, IsZoomed, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOWNA,
-    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetForegroundWindow,
-    SetWindowPos, ShowWindowAsync, WM_CLOSE,
+    GetCursorPos, GetForegroundWindow, IsIconic, IsZoomed, PostMessageW, SW_HIDE, SW_RESTORE,
+    SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+    SetForegroundWindow, SetWindowPos, ShowWindowAsync, WM_CLOSE,
 };
 
 use crate::{hidden, monitor, window};
@@ -172,6 +173,12 @@ impl Platform for Win32Platform {
         // SAFETY: validated handle; PostMessage never blocks on the target.
         unsafe { PostMessageW(Some(hwnd), WM_CLOSE, Default::default(), Default::default()) }
             .map_err(|e| PlatformError::Os(e.to_string()))
+    }
+
+    fn cursor_pos(&self) -> Option<(i32, i32)> {
+        let mut p = POINT::default();
+        // SAFETY: `p` is a valid out-pointer.
+        unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y))
     }
 
     fn spawn(&mut self, command_line: &str) -> Result<()> {

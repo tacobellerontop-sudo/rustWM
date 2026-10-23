@@ -27,7 +27,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::events::send;
 
-static BINDINGS: RwLock<Option<HashMap<Chord, String>>> = RwLock::new(None);
+/// Bindings per mode name; the normal mode is `default`.
+static BINDINGS: RwLock<Option<HashMap<String, HashMap<Chord, String>>>> = RwLock::new(None);
+
+/// The active binding mode.
+static MODE: RwLock<String> = RwLock::new(String::new());
+
+const DEFAULT_MODE: &str = "default";
 
 /// A Win+key chord fired since Win went down, so Start must not open on release.
 static WIN_CHORD_FIRED: AtomicBool = AtomicBool::new(false);
@@ -38,11 +44,26 @@ static SWALLOWED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// An unassigned virtual key, injected to stop the Start menu opening.
 const VK_NONE: u16 = 0xE8;
 
-/// Replaces the active key bindings. Safe to call from any thread at any time.
-pub fn set_bindings(bindings: impl IntoIterator<Item = (Chord, String)>) {
-    let map = bindings.into_iter().collect();
+/// Replaces all key bindings: the default mode's and every other mode's.
+/// Safe to call from any thread at any time.
+pub fn set_bindings(
+    default: impl IntoIterator<Item = (Chord, String)>,
+    modes: impl IntoIterator<Item = (String, Vec<(Chord, String)>)>,
+) {
+    let mut map: HashMap<String, HashMap<Chord, String>> = modes
+        .into_iter()
+        .map(|(name, binds)| (name, binds.into_iter().collect()))
+        .collect();
+    map.insert(DEFAULT_MODE.into(), default.into_iter().collect());
     if let Ok(mut b) = BINDINGS.write() {
         *b = Some(map);
+    }
+}
+
+/// Switches the active binding mode. Unknown modes behave like `default`.
+pub fn set_mode(mode: &str) {
+    if let Ok(mut m) = MODE.write() {
+        mode.clone_into(&mut m);
     }
 }
 
@@ -70,7 +91,14 @@ fn is_modifier(vk: u32) -> bool {
 }
 
 fn lookup(chord: &Chord) -> Option<String> {
-    BINDINGS.read().ok()?.as_ref()?.get(chord).cloned()
+    let bindings = BINDINGS.read().ok()?;
+    let bindings = bindings.as_ref()?;
+    let mode = MODE.read().ok()?;
+    bindings
+        .get(mode.as_str())
+        .or_else(|| bindings.get(DEFAULT_MODE))?
+        .get(chord)
+        .cloned()
 }
 
 /// Taps an unassigned key so Windows sees Win+<something> and skips Start.

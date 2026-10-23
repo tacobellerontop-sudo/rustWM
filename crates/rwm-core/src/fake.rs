@@ -29,6 +29,7 @@ pub struct FakePlatform {
     pub hidden: Vec<WindowHandle>,
     pub foreground: Option<WindowHandle>,
     pub calls: Vec<Call>,
+    pub cursor: Option<(i32, i32)>,
     /// Command lines starting with any of these fail to spawn.
     pub failing_spawns: Vec<String>,
 }
@@ -162,6 +163,10 @@ impl Platform for FakePlatform {
         self.calls.push(Call::Close(handle));
         self.get_mut(handle)?;
         Ok(())
+    }
+
+    fn cursor_pos(&self) -> Option<(i32, i32)> {
+        self.cursor
     }
 
     fn spawn(&mut self, command_line: &str) -> Result<()> {

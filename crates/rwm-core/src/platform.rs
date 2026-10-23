@@ -60,6 +60,9 @@ pub trait Platform {
     /// Politely asks a window to close (like clicking its close button).
     fn close(&mut self, handle: WindowHandle) -> Result<()>;
 
+    /// The mouse cursor position in physical pixels.
+    fn cursor_pos(&self) -> Option<(i32, i32)>;
+
     /// Launches a command line detached from the window manager.
     fn spawn(&mut self, command_line: &str) -> Result<()>;
 }

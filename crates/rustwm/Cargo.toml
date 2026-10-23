@@ -10,6 +10,8 @@ repository.workspace = true
 [dependencies]
 rwm-core.workspace = true
 rwm-config.workspace = true
+rwm-ipc.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 notify.workspace = true

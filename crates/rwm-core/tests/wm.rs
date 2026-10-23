@@ -350,7 +350,9 @@ mod dual_monitor {
             .place(W(1), Rect::new(3000, 500, 400, 400));
         wm.handle(Event::WindowMoveEnded(W(1)));
         assert_eq!(rect(&wm, 2), Rect::new(0, 0, 1920, 1040));
-        assert_eq!(rect(&wm, 1).x, 2880);
+        // Dropped onto window 3, so it takes 3's slot and 3 moves along.
+        assert_eq!(rect(&wm, 1).x, 1920);
+        assert_eq!(rect(&wm, 3).x, 2880);
     }
 
     #[test]

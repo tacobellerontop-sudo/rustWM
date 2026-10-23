@@ -9,6 +9,13 @@ use std::str::FromStr;
 use crate::geometry::Direction;
 use crate::layout::LayoutKind;
 
+/// The special workspace `toggle-special` uses when no name is given.
+pub const DEFAULT_SPECIAL: &str = "scratch";
+
+/// Prefix that names a special workspace in `move-to-workspace` and rules,
+/// e.g. `special:scratch`.
+pub const SPECIAL_PREFIX: &str = "special:";
+
 /// How much `resize grow`/`resize shrink` changes a ratio by default.
 pub const DEFAULT_RESIZE_STEP: f32 = 0.05;
 
@@ -51,6 +58,11 @@ pub enum Command {
     ToggleFullscreen,
     /// Re-read the config file.
     Reload,
+    /// `toggle-special [name]`: show or hide a special (scratchpad) workspace
+    /// over the focused monitor. The name defaults to `scratch`.
+    ToggleSpecial(String),
+    /// `mode <name>`: switch key-binding mode (`default` to leave).
+    Mode(String),
     /// Show every hidden window without quitting.
     Restore,
     /// Restore all windows and exit.
@@ -188,6 +200,11 @@ impl FromStr for Command {
             "toggle-float" => no_arg("toggle-float", rest, Command::ToggleFloat),
             "toggle-fullscreen" => no_arg("toggle-fullscreen", rest, Command::ToggleFullscreen),
             "reload" => no_arg("reload", rest, Command::Reload),
+            "toggle-special" if rest.is_empty() => {
+                Ok(Command::ToggleSpecial(DEFAULT_SPECIAL.into()))
+            }
+            "toggle-special" => name_arg("toggle-special", rest).map(Command::ToggleSpecial),
+            "mode" => name_arg("mode", rest).map(Command::Mode),
             "exec" if rest.is_empty() => Err(ParseError::BadArgument {
                 cmd: "exec",
                 expected: "a command line",
@@ -231,6 +248,8 @@ impl fmt::Display for Command {
             Command::ToggleFloat => f.write_str("toggle-float"),
             Command::ToggleFullscreen => f.write_str("toggle-fullscreen"),
             Command::Reload => f.write_str("reload"),
+            Command::ToggleSpecial(n) => write!(f, "toggle-special {n}"),
+            Command::Mode(m) => write!(f, "mode {m}"),
             Command::Restore => f.write_str("restore"),
             Command::Quit => f.write_str("quit"),
         }
@@ -273,6 +292,9 @@ mod tests {
             "toggle-float",
             "toggle-fullscreen",
             "reload",
+            "toggle-special music",
+            "mode resize",
+            "move-to-workspace special:scratch",
         ] {
             assert_eq!(parse(s).to_string(), s);
         }
@@ -297,17 +319,35 @@ mod tests {
             "fly away".parse::<Command>(),
             Err(ParseError::Unknown(_))
         ));
-        assert!(matches!(
-            "focus sideways".parse::<Command>(),
-            Err(ParseError::BadArgument { .. })
-        ));
-        assert!(matches!(
-            "promote now".parse::<Command>(),
-            Err(ParseError::BadArgument { .. })
-        ));
-        assert!(matches!(
-            "exec".parse::<Command>(),
-            Err(ParseError::BadArgument { .. })
-        ));
+        for bad in [
+            "focus sideways",
+            "promote now",
+            "exec",
+            "workspace",
+            "workspace a b",
+            "layout spiral",
+            "resize",
+            "resize grow 2",
+            "resize up",
+            "focus-monitor next",
+            "mode",
+        ] {
+            assert!(
+                matches!(bad.parse::<Command>(), Err(ParseError::BadArgument { .. })),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_for_optional_arguments() {
+        assert_eq!(
+            parse("resize shrink"),
+            Command::Resize(-DEFAULT_RESIZE_STEP)
+        );
+        assert_eq!(
+            parse("toggle-special"),
+            Command::ToggleSpecial("scratch".into())
+        );
     }
 }

@@ -362,31 +362,35 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rustwm"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "notify",
  "rwm-config",
  "rwm-core",
+ "rwm-ipc",
  "rwm-win32",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "rwm-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rwm-config",
  "rwm-ipc",
  "rwm-win32",
+ "serde_json",
 ]
 
 [[package]]
 name = "rwm-config"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "rwm-core",
  "serde",
@@ -396,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "rwm-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "regex",
  "rwm-core",
@@ -407,15 +411,16 @@ dependencies = [
 
 [[package]]
 name = "rwm-ipc"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "windows",
 ]
 
 [[package]]
 name = "rwm-win32"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "rwm-config",
  "rwm-core",

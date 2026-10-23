@@ -4,6 +4,8 @@
 //! empty so the workspace still builds and tests everywhere.
 
 #[cfg(windows)]
+pub mod autostart;
+#[cfg(windows)]
 mod events;
 #[cfg(windows)]
 mod hidden;
@@ -14,6 +16,8 @@ mod monitor;
 #[cfg(windows)]
 mod platform;
 #[cfg(windows)]
+mod tray;
+#[cfg(windows)]
 mod window;
 
 #[cfg(windows)]
@@ -21,6 +25,8 @@ pub use events::{EventThread, install_ctrl_handler};
 #[cfg(windows)]
 pub use hidden::restore_hidden_windows;
 #[cfg(windows)]
-pub use hotkeys::set_bindings;
+pub use hotkeys::{set_bindings, set_mode};
 #[cfg(windows)]
 pub use platform::{Win32Platform, enable_dpi_awareness};
+#[cfg(windows)]
+pub use tray::{notify, set_config_path};

@@ -31,10 +31,14 @@ Logging is controlled with `RUST_LOG`, e.g. `RUST_LOG=rwm_core=debug`.
 ## Using it
 
 ```powershell
-cargo build --release
-.\target\release\rustwm.exe        # tiles every window; Ctrl+C or Win+Ctrl+Shift+Q to quit
-.\target\release\rwm.exe restore   # shows any window rustWM hid, even after a crash
+cargo build --release              # or download a release zip
+.\target\release\rwm.exe start     # starts rustwm.exe in the background, with a tray icon
+.\target\release\rwm.exe stop      # quits and restores every window
+rwm autostart on                   # start at login
 ```
+
+Put both `.exe` files somewhere on your `PATH`. Logs go to
+`%LOCALAPPDATA%\rustwm\rustwm.log`; run `rustwm.exe` directly to see them in a console.
 
 On first run rustWM writes a commented config to
 `%USERPROFILE%\.config\rustwm\rustwm.toml`. Edits are picked up when you save; a
@@ -78,17 +82,42 @@ actions = ["workspace 9"]        # float | ignore | workspace <name>
 | Win + = / Win + - | grow / shrink the focused window |
 | Win + Shift + Q | close window |
 | Win + Shift + R | reload config |
+| Win + ` / Win + Shift + ` | toggle the scratchpad / send window to it |
+| Win + Alt + R | resize mode: H/J/K/L or arrows, Esc or Enter to leave |
 | Win + Ctrl + R | retile |
 | Win + Ctrl + Shift + Q | quit and restore all windows |
 
+Dragging a tiled window onto another swaps them; dropping it on another monitor moves it
+there.
+
 ### Commands
 
-Bindings (and, from M4, `rwm <command>`) use one command language:
+Bindings and `rwm <command>` use one command language:
 `focus <dir|next|prev>`, `move <dir|next|prev>`, `promote`, `close`, `terminal`,
 `exec <command line>`, `workspace <name|n>`, `move-to-workspace <name|n>`,
 `focus-monitor <dir>`, `move-to-monitor <dir>`, `layout <dwindle|master|monocle|reset>`,
 `cycle-layout`, `resize <grow|shrink> [amount]`, `toggle-float`, `toggle-fullscreen`,
-`retile`, `reload`, `restore`, `quit`.
+`toggle-special [name]`, `mode <name>`, `retile`, `reload`, `restore`, `quit`.
+`move-to-workspace special:<name>` sends a window to a special workspace, and rules can use
+`workspace special:<name>` too. An empty special workspace opens your terminal when shown.
+
+### Scripting and status bars
+
+`rwm` talks to rustWM over the named pipe `\\.\pipe\rustwm` with newline-delimited JSON,
+and anything else (a status bar like Zebar or YASB, a script) can use the same pipe:
+
+```text
+rwm query state | windows | focused | config | version
+rwm subscribe [focus] [workspace] [window]     # one JSON line per change
+rwm check-config [path]
+rwm restore                                    # works even if rustWM crashed
+```
+
+| Request | Reply |
+|---|---|
+| `{"cmd": "focus left"}` | `{"v":1,"ok":true}` once the command ran, or `{"v":1,"ok":false,"error":"..."}` |
+| `{"query": "state"}` | `{"v":1,"ok":true,"data":{...}}`: monitors, workspaces, windows, focus, mode |
+| `{"subscribe": ["workspace","focus"]}` | `{"v":1,"ok":true}`, then `{"v":1,"event":"init","state":{...}}` and one event per change |
 
 ### Known limitations
 
@@ -104,7 +133,7 @@ Bindings (and, from M4, `rwm <command>`) use one command language:
 - [x] **M1 See and move**: enumerate and filter windows, WinEvent hook, monitors and DPI, move/resize, `rwm restore`.
 - [x] **M2 Dwindle tiling**: workspaces, dwindle layout, gaps, auto-tile, geometric focus and swap, hotkeys.
 - [x] **M3 Config, workspaces, layouts**: TOML + hot reload, `terminal` command, rules, 1–9 workspaces, multi-monitor, master-stack, monocle, floating, fullscreen.
-- [ ] **M4 IPC and polish**: named pipe, `rwm` CLI, query and subscribe, special workspace, resize mode, tray, autostart.
+- [x] **M4 IPC and polish**: named pipe, `rwm` CLI, query and subscribe, special workspace, resize mode, tray, autostart.
 
 ## License
 

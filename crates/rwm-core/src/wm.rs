@@ -2,12 +2,13 @@ use std::collections::{BTreeSet, HashMap};
 
 use tracing::{debug, info, warn};
 
-use crate::command::{Command, Target};
+use crate::command::{Command, SPECIAL_PREFIX, Target};
 use crate::geometry::Direction;
 use crate::layout::{Gaps, LayoutKind};
 use crate::rules::{self, Rule, Verdict};
-use crate::workspace::{InsertPos, Monitor};
-use crate::{Event, Platform, Rect, WindowHandle};
+use crate::state::{MonitorState, State, WindowState, WorkspaceState};
+use crate::workspace::{InsertPos, Monitor, Workspace};
+use crate::{Event, Platform, Rect, WindowHandle, WindowInfo};
 
 /// Whether the event loop should keep running after an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,11 +48,37 @@ impl Default for Settings {
 
 const FALLBACK_TERMINALS: &[&str] = &["wt.exe", "cmd.exe"];
 
-/// Where a window lives: monitor index and workspace index.
+/// The name of the normal key-binding mode.
+pub const DEFAULT_MODE: &str = "default";
+
+/// A shown special workspace covers this fraction of the work area.
+const SPECIAL_SCALE: f32 = 0.9;
+
+/// Where a window lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Loc {
-    monitor: usize,
-    workspace: usize,
+enum Loc {
+    /// A regular workspace: monitor index and workspace index.
+    Ws { monitor: usize, workspace: usize },
+    /// A special workspace, by index into `Wm::specials`.
+    Special(usize),
+}
+
+/// What we remember about a managed window for queries.
+#[derive(Debug, Clone, Default)]
+struct Meta {
+    title: String,
+    exe: String,
+    class: String,
+}
+
+impl From<&WindowInfo> for Meta {
+    fn from(w: &WindowInfo) -> Self {
+        Self {
+            title: w.title.clone(),
+            exe: w.exe.clone(),
+            class: w.class.clone(),
+        }
+    }
 }
 
 /// The window manager: owns all state and is the only thing that calls into
@@ -61,6 +88,13 @@ pub struct Wm<P: Platform> {
     settings: Settings,
     monitors: Vec<Monitor>,
     focused_monitor: usize,
+    /// Special (scratchpad) workspaces, created on first use.
+    specials: Vec<Workspace>,
+    /// The special workspace shown, and the monitor it is shown on.
+    special_shown: Option<(usize, usize)>,
+    /// Focus is inside the shown special workspace.
+    special_focused: bool,
+    mode: String,
     /// Windows rustWM itself hid. They must be shown again on exit or crash,
     /// and their `WindowHidden` events must not be read as closes.
     hidden_by_us: BTreeSet<WindowHandle>,
@@ -69,6 +103,7 @@ pub struct Wm<P: Platform> {
     /// The rect each tiled window was last given, so unchanged windows are not
     /// moved again and geometric focus works from the layout, not the OS.
     applied: HashMap<WindowHandle, Rect>,
+    meta: HashMap<WindowHandle, Meta>,
 }
 
 impl<P: Platform> Wm<P> {
@@ -82,9 +117,14 @@ impl<P: Platform> Wm<P> {
             settings,
             monitors: Vec::new(),
             focused_monitor: 0,
+            specials: Vec::new(),
+            special_shown: None,
+            special_focused: false,
+            mode: DEFAULT_MODE.into(),
             hidden_by_us: BTreeSet::new(),
             ignored: BTreeSet::new(),
             applied: HashMap::new(),
+            meta: HashMap::new(),
         }
     }
 
@@ -109,7 +149,12 @@ impl<P: Platform> Wm<P> {
             let monitor = self.monitor_at(w.rect).unwrap_or(0);
             let verdict = rules::evaluate(&self.settings.rules, &w);
             debug!(handle = ?w.handle, exe = %w.exe, title = %w.title, ?verdict, "adopting window");
-            self.place(w.handle, monitor, &verdict, InsertPos::End);
+            if self
+                .place(w.handle, monitor, &verdict, InsertPos::End)
+                .is_some()
+            {
+                self.meta.insert(w.handle, Meta::from(&w));
+            }
         }
         for mon in &mut self.monitors {
             for ws in &mut mon.workspaces {
@@ -140,13 +185,15 @@ impl<P: Platform> Wm<P> {
     pub fn handle(&mut self, event: Event) -> Flow {
         debug!(?event, "event");
         match event {
-            Event::WindowShown(h) | Event::WindowRestored(h) | Event::WindowTitleChanged(h) => {
-                if !self.hidden_by_us.contains(&h)
-                    && !self.ignored.contains(&h)
-                    && self.locate(h).is_none()
-                {
-                    self.manage(h);
+            Event::WindowShown(h) | Event::WindowRestored(h) => self.maybe_manage(h),
+            Event::WindowTitleChanged(h) => {
+                if self.meta.contains_key(&h) {
+                    if let Some(w) = self.platform.window_info(h) {
+                        self.meta.insert(h, Meta::from(&w));
+                    }
+                    return Flow::Continue;
                 }
+                self.maybe_manage(h);
             }
             Event::WindowHidden(h) => {
                 if !self.hidden_by_us.contains(&h) {
@@ -165,10 +212,12 @@ impl<P: Platform> Wm<P> {
             }
             Event::WindowMoveEnded(h) => self.window_dropped(h),
             Event::DisplayChanged => self.refresh_monitors(),
-            Event::Command(cmd) => match cmd.parse::<Command>() {
-                Ok(c) => return self.execute(c),
-                Err(e) => warn!(command = %cmd, error = %e, "invalid command"),
-            },
+            Event::Command(cmd) | Event::Request { command: cmd, .. } => {
+                match cmd.parse::<Command>() {
+                    Ok(c) => return self.execute(c),
+                    Err(e) => warn!(command = %cmd, error = %e, "invalid command"),
+                }
+            }
             Event::Shutdown => {
                 self.restore();
                 return Flow::Exit;
@@ -213,17 +262,17 @@ impl<P: Platform> Wm<P> {
                     }
                 }
             }
-            Command::Layout(layout) => self.current_workspace_mut().layout = layout,
+            Command::Layout(layout) => self.current_ws_mut().layout = layout,
             Command::CycleLayout => {
-                let ws = self.current_workspace_mut();
+                let ws = self.current_ws_mut();
                 ws.layout = ws.layout.next();
             }
-            Command::LayoutReset => self.current_workspace_mut().ratios.reset(),
+            Command::LayoutReset => self.current_ws_mut().ratios.reset(),
             Command::Resize(delta) => self.resize(delta),
             Command::ToggleFloat => self.toggle_float(),
             Command::ToggleFullscreen => {
                 if let Some(h) = self.focused() {
-                    let ws = self.current_workspace_mut();
+                    let ws = self.current_ws_mut();
                     ws.fullscreen = if ws.fullscreen == Some(h) {
                         None
                     } else {
@@ -231,6 +280,11 @@ impl<P: Platform> Wm<P> {
                     };
                     self.applied.remove(&h);
                 }
+            }
+            Command::ToggleSpecial(name) => self.toggle_special(&name),
+            Command::Mode(mode) => {
+                info!(%mode, "binding mode");
+                self.mode = mode;
             }
             Command::Reload => return Flow::Reload,
             Command::Restore => self.restore(),
@@ -246,48 +300,108 @@ impl<P: Platform> Wm<P> {
     // ---- state queries ------------------------------------------------------
 
     fn locate(&self, h: WindowHandle) -> Option<Loc> {
-        self.monitors.iter().enumerate().find_map(|(mi, m)| {
-            m.workspaces
-                .iter()
-                .position(|ws| ws.contains(h))
-                .map(|wi| Loc {
-                    monitor: mi,
-                    workspace: wi,
-                })
-        })
+        self.monitors
+            .iter()
+            .enumerate()
+            .find_map(|(mi, m)| {
+                m.workspaces
+                    .iter()
+                    .position(|ws| ws.contains(h))
+                    .map(|wi| Loc::Ws {
+                        monitor: mi,
+                        workspace: wi,
+                    })
+            })
+            .or_else(|| {
+                self.specials
+                    .iter()
+                    .position(|ws| ws.contains(h))
+                    .map(Loc::Special)
+            })
     }
 
-    /// The monitor whose bounds contain the centre of `rect`.
-    fn monitor_at(&self, rect: Rect) -> Option<usize> {
-        let (x, y) = rect.center();
+    fn ws(&self, loc: Loc) -> &Workspace {
+        match loc {
+            Loc::Ws { monitor, workspace } => &self.monitors[monitor].workspaces[workspace],
+            Loc::Special(i) => &self.specials[i],
+        }
+    }
+
+    fn ws_mut(&mut self, loc: Loc) -> &mut Workspace {
+        match loc {
+            Loc::Ws { monitor, workspace } => &mut self.monitors[monitor].workspaces[workspace],
+            Loc::Special(i) => &mut self.specials[i],
+        }
+    }
+
+    fn is_visible(&self, loc: Loc) -> bool {
+        match loc {
+            Loc::Ws { monitor, workspace } => self.monitors[monitor].active == workspace,
+            Loc::Special(i) => self.special_shown.is_some_and(|(s, _)| s == i),
+        }
+    }
+
+    /// The workspace commands act on: the shown special workspace when it has
+    /// focus, otherwise the focused monitor's active workspace.
+    fn current_loc(&self) -> Loc {
+        match self.special_shown {
+            Some((i, _)) if self.special_focused => Loc::Special(i),
+            _ => Loc::Ws {
+                monitor: self.focused_monitor,
+                workspace: self.monitors[self.focused_monitor].active,
+            },
+        }
+    }
+
+    fn current_ws_mut(&mut self) -> &mut Workspace {
+        let loc = self.current_loc();
+        self.ws_mut(loc)
+    }
+
+    /// The monitor whose bounds contain the point.
+    fn monitor_at_point(&self, (x, y): (i32, i32)) -> Option<usize> {
         self.monitors
             .iter()
             .position(|m| m.info.rect.contains_point(x, y))
     }
 
-    /// The focused window, if the focused monitor's workspace has one.
+    /// The monitor whose bounds contain the centre of `rect`.
+    fn monitor_at(&self, rect: Rect) -> Option<usize> {
+        self.monitor_at_point(rect.center())
+    }
+
+    /// The focused window of the current workspace.
     pub fn focused(&self) -> Option<WindowHandle> {
-        self.monitors.get(self.focused_monitor)?.workspace().focused
+        if self.monitors.is_empty() {
+            return None;
+        }
+        self.ws(self.current_loc()).focused
     }
 
     pub fn focused_monitor(&self) -> usize {
         self.focused_monitor
     }
 
-    fn current_workspace_mut(&mut self) -> &mut crate::workspace::Workspace {
-        self.monitors[self.focused_monitor].workspace_mut()
+    pub fn mode(&self) -> &str {
+        &self.mode
     }
 
-    /// Every window on every visible workspace, tiled before floating.
+    /// Every window on screen: visible workspaces, then the shown special one.
     pub fn managed(&self) -> impl Iterator<Item = WindowHandle> + '_ {
-        self.monitors.iter().flat_map(|m| m.workspace().windows())
+        let special = self.special_shown.map(|(i, _)| &self.specials[i]);
+        self.monitors
+            .iter()
+            .flat_map(|m| m.workspace().windows())
+            .chain(special.into_iter().flat_map(|ws| ws.windows()))
     }
 
     /// Every managed window on every workspace, visible or not.
     pub fn all_windows(&self) -> impl Iterator<Item = WindowHandle> + '_ {
         self.monitors
             .iter()
-            .flat_map(|m| m.workspaces.iter().flat_map(|ws| ws.windows()))
+            .flat_map(|m| m.workspaces.iter())
+            .chain(&self.specials)
+            .flat_map(|ws| ws.windows())
     }
 
     pub fn monitors(&self) -> &[Monitor] {
@@ -306,7 +420,58 @@ impl<P: Platform> Wm<P> {
         &mut self.platform
     }
 
+    /// A snapshot of everything, for queries and status bars.
+    pub fn snapshot(&self) -> State {
+        let window = |ws: &Workspace, h: WindowHandle| {
+            let m = self.meta.get(&h).cloned().unwrap_or_default();
+            WindowState {
+                handle: h.0,
+                title: m.title,
+                exe: m.exe,
+                class: m.class,
+                floating: ws.is_floating(h),
+                fullscreen: ws.fullscreen == Some(h),
+            }
+        };
+        let workspace = |ws: &Workspace| WorkspaceState {
+            name: ws.name.clone(),
+            layout: ws.layout,
+            focused: ws.focused.map(|h| h.0),
+            windows: ws.windows().map(|h| window(ws, h)).collect(),
+        };
+        State {
+            focused_monitor: self.focused_monitor,
+            focused_window: self.focused().map(|h| {
+                let ws = self.ws(self.current_loc());
+                window(ws, h)
+            }),
+            mode: self.mode.clone(),
+            special: self
+                .special_shown
+                .map(|(i, _)| self.specials[i].name.clone()),
+            monitors: self
+                .monitors
+                .iter()
+                .map(|m| MonitorState {
+                    id: m.info.id.clone(),
+                    rect: m.info.rect,
+                    work_area: m.info.work_area,
+                    scale: m.info.scale,
+                    active_workspace: m.workspace().name.clone(),
+                    workspaces: m.workspaces.iter().map(workspace).collect(),
+                })
+                .collect(),
+        }
+    }
+
     // ---- managing windows ---------------------------------------------------
+
+    fn maybe_manage(&mut self, h: WindowHandle) {
+        if !self.hidden_by_us.contains(&h) && !self.ignored.contains(&h) && self.locate(h).is_none()
+        {
+            self.manage(h);
+        }
+    }
 
     fn manage(&mut self, h: WindowHandle) {
         let Some(w) = self.platform.window_info(h) else {
@@ -315,22 +480,53 @@ impl<P: Platform> Wm<P> {
         if !w.manageable || w.minimized || self.monitors.is_empty() {
             return;
         }
-        let verdict = rules::evaluate(&self.settings.rules, &w);
+        let mut verdict = rules::evaluate(&self.settings.rules, &w);
         debug!(handle = ?h, exe = %w.exe, title = %w.title, ?verdict, "managing window");
         if verdict.ignore {
             self.ignored.insert(h);
             return;
         }
+        // While a special workspace has focus, new windows open inside it.
+        if verdict.workspace.is_none() && self.special_focused {
+            if let Some((i, _)) = self.special_shown {
+                verdict.workspace = Some(format!("{SPECIAL_PREFIX}{}", self.specials[i].name));
+            }
+        }
         let pos = self.settings.new_window;
         if let Some(loc) = self.place(h, self.focused_monitor, &verdict, pos) {
-            if loc.workspace == self.monitors[loc.monitor].active {
-                self.monitors[loc.monitor].workspaces[loc.workspace].focused = Some(h);
+            self.meta.insert(h, Meta::from(&w));
+            if self.is_visible(loc) {
+                self.ws_mut(loc).focused = Some(h);
             }
         }
     }
 
-    /// Adds `h` to monitor `mi`, on the workspace a rule names (hidden if that
-    /// workspace is not active) or the active one. Returns where it went.
+    /// Finds or creates the special workspace called `name`.
+    fn special(&mut self, name: &str) -> usize {
+        match self.specials.iter().position(|ws| ws.name == name) {
+            Some(i) => i,
+            None => {
+                self.specials
+                    .push(Workspace::new(name, self.settings.default_layout));
+                self.specials.len() - 1
+            }
+        }
+    }
+
+    /// Resolves a workspace name on monitor `mi`: a regular name or number,
+    /// or `special:<name>`.
+    fn resolve(&mut self, mi: usize, name: &str) -> Option<Loc> {
+        if let Some(special) = name.strip_prefix(SPECIAL_PREFIX) {
+            return Some(Loc::Special(self.special(special)));
+        }
+        self.monitors[mi].find_workspace(name).map(|wi| Loc::Ws {
+            monitor: mi,
+            workspace: wi,
+        })
+    }
+
+    /// Adds `h` on monitor `mi`, on the workspace a rule names (hidden if that
+    /// workspace is not visible) or the active one. Returns where it went.
     fn place(
         &mut self,
         h: WindowHandle,
@@ -342,56 +538,80 @@ impl<P: Platform> Wm<P> {
             self.ignored.insert(h);
             return None;
         }
-        let mon = self.monitors.get_mut(mi)?;
-        let wi = verdict
-            .workspace
-            .as_deref()
-            .and_then(|name| {
-                let found = mon.find_workspace(name);
-                if found.is_none() {
-                    warn!(workspace = name, "rule names an unknown workspace");
-                }
-                found
-            })
-            .unwrap_or(mon.active);
-        mon.workspaces[wi].add(h, verdict.float, pos);
-        if wi != mon.active {
+        let active = Loc::Ws {
+            monitor: mi,
+            workspace: self.monitors.get(mi)?.active,
+        };
+        let loc = match verdict.workspace.as_deref() {
+            Some(name) => self.resolve(mi, name).unwrap_or_else(|| {
+                warn!(workspace = name, "rule names an unknown workspace");
+                active
+            }),
+            None => active,
+        };
+        self.ws_mut(loc).add(h, verdict.float, pos);
+        if !self.is_visible(loc) {
             self.hide(h);
         }
-        Some(Loc {
-            monitor: mi,
-            workspace: wi,
-        })
+        Some(loc)
     }
 
     fn unmanage(&mut self, h: WindowHandle) {
         if let Some(loc) = self.locate(h) {
-            self.monitors[loc.monitor].workspaces[loc.workspace].remove(h);
+            self.ws_mut(loc).remove(h);
             self.applied.remove(&h);
+            self.meta.remove(&h);
         }
     }
 
-    /// The user finished dragging `h`. Dropped on another monitor, it moves
-    /// there; otherwise a tiled window snaps back into its slot.
+    /// The user finished dragging `h`. A tiled window dropped onto another
+    /// tiled window swaps with it; dropped on another monitor it moves there;
+    /// otherwise it snaps back into its slot.
     fn window_dropped(&mut self, h: WindowHandle) {
         let Some(loc) = self.locate(h) else {
             return;
         };
+        let floating = self.ws(loc).is_floating(h);
         self.applied.remove(&h);
-        let target = self
+        let point = self
             .platform
-            .window_info(h)
-            .and_then(|w| self.monitor_at(w.rect));
-        if let Some(m) = target.filter(|m| *m != loc.monitor) {
+            .cursor_pos()
+            .or_else(|| self.platform.window_info(h).map(|w| w.rect.center()));
+        let Some(point) = point else {
+            return;
+        };
+        let under = (!floating)
+            .then(|| {
+                self.managed().find(|o| {
+                    *o != h
+                        && self
+                            .applied
+                            .get(o)
+                            .is_some_and(|r| r.contains_point(point.0, point.1))
+                })
+            })
+            .flatten();
+        let from_monitor = match loc {
+            Loc::Ws { monitor, .. } => Some(monitor),
+            Loc::Special(_) => None,
+        };
+        let target_monitor = self.monitor_at_point(point);
+        if let Some(m) =
+            target_monitor.filter(|m| Some(*m) != from_monitor && from_monitor.is_some())
+        {
             self.transfer_keep_rect(h, loc, m);
+        }
+        if let (Some(other), Some(now)) = (under, self.locate(h)) {
+            if self.locate(other) == Some(now) && !self.ws(now).is_floating(other) {
+                self.ws_mut(now).swap(h, other);
+            }
         }
     }
 
     /// Moves `h` to the active workspace of monitor `to` and keeps it focused.
     /// Floating windows are recentred on the new monitor.
     fn transfer(&mut self, h: WindowHandle, from: Loc, to: usize) {
-        let floating = self.transfer_keep_rect(h, from, to);
-        if floating {
+        if self.transfer_keep_rect(h, from, to) {
             self.center_floating(h, to);
         }
     }
@@ -399,23 +619,32 @@ impl<P: Platform> Wm<P> {
     /// Like [`Wm::transfer`] but leaves a floating window where it is.
     /// Returns whether the window is floating.
     fn transfer_keep_rect(&mut self, h: WindowHandle, from: Loc, to: usize) -> bool {
-        let src = &mut self.monitors[from.monitor].workspaces[from.workspace];
-        let floating = src.is_floating(h);
-        src.remove(h);
+        let floating = self.ws(from).is_floating(h);
+        self.ws_mut(from).remove(h);
         let pos = self.settings.new_window;
         let ws = self.monitors[to].workspace_mut();
         ws.add(h, floating, pos);
         ws.focused = Some(h);
         self.focused_monitor = to;
+        self.special_focused = false;
         floating
     }
 
     fn set_focus_state(&mut self, h: WindowHandle) {
-        if let Some(loc) = self.locate(h) {
-            if loc.workspace == self.monitors[loc.monitor].active {
-                self.focused_monitor = loc.monitor;
-                self.monitors[loc.monitor].workspaces[loc.workspace].focused = Some(h);
+        match self.locate(h) {
+            Some(loc @ Loc::Ws { monitor, .. }) if self.is_visible(loc) => {
+                self.focused_monitor = monitor;
+                self.special_focused = false;
+                self.ws_mut(loc).focused = Some(h);
             }
+            Some(loc @ Loc::Special(_)) if self.is_visible(loc) => {
+                self.special_focused = true;
+                if let Some((_, m)) = self.special_shown {
+                    self.focused_monitor = m;
+                }
+                self.ws_mut(loc).focused = Some(h);
+            }
+            _ => {}
         }
     }
 
@@ -436,8 +665,7 @@ impl<P: Platform> Wm<P> {
         };
         let mon = &mut self.monitors[mi];
         while mon.workspaces.len() < names.len() {
-            mon.workspaces
-                .push(crate::workspace::Workspace::new("", layout));
+            mon.workspaces.push(Workspace::new("", layout));
         }
         let removed: Vec<_> = mon.workspaces.drain(names.len()..).collect();
         for (ws, name) in mon.workspaces.iter_mut().zip(&names) {
@@ -502,6 +730,9 @@ impl<P: Platform> Wm<P> {
             }
         }
         self.focused_monitor = self.focused_monitor.min(self.monitors.len() - 1);
+        if let Some((i, m)) = self.special_shown {
+            self.special_shown = Some((i, m.min(self.monitors.len() - 1)));
+        }
         self.applied.clear();
     }
 
@@ -528,10 +759,9 @@ impl<P: Platform> Wm<P> {
     }
 
     fn neighbour(&self, target: Target) -> Option<WindowHandle> {
+        let current = self.current_loc();
         // In monocle every window has the same rect, so directions walk the list.
-        let monocle = self.monitors.get(self.focused_monitor).is_some_and(|m| {
-            m.workspace().layout == LayoutKind::Monocle && self.focused().is_some()
-        });
+        let monocle = self.ws(current).layout == LayoutKind::Monocle && self.focused().is_some();
         match target {
             Target::Dir(Direction::Left | Direction::Up) if monocle => self.neighbour(Target::Prev),
             Target::Dir(Direction::Right | Direction::Down) if monocle => {
@@ -540,19 +770,19 @@ impl<P: Platform> Wm<P> {
             Target::Dir(dir) => {
                 let from = self.origin()?;
                 let me = self.focused();
+                // Inside a shown special workspace, stay inside it.
+                let in_special = matches!(current, Loc::Special(_));
                 from.nearest(
                     dir,
                     self.managed()
                         .filter(|h| Some(*h) != me)
+                        .filter(|h| !in_special || self.ws(current).contains(*h))
                         .filter_map(|h| self.rect_of(h).map(|r| (h, r))),
                 )
             }
             Target::Next | Target::Prev => {
                 let step = if target == Target::Next { 1 } else { -1 };
-                let h = self.focused()?;
-                self.monitors[self.focused_monitor]
-                    .workspace()
-                    .cycle(h, step)
+                self.ws(current).cycle(self.focused()?, step)
             }
         }
     }
@@ -575,6 +805,7 @@ impl<P: Platform> Wm<P> {
             return;
         };
         self.focused_monitor = m;
+        self.special_focused = false;
         if let Some(h) = self.monitors[m].workspace().focused {
             self.focus_window(h);
         }
@@ -587,23 +818,23 @@ impl<P: Platform> Wm<P> {
         let Some(loc) = self.locate(h) else {
             return;
         };
-        if self.monitors[loc.monitor].workspaces[loc.workspace].is_floating(h) {
+        if self.ws(loc).is_floating(h) {
             return;
         }
         match self.neighbour(target) {
             Some(other) => match self.locate(other) {
                 Some(oloc) if oloc == loc => {
-                    let ws = &mut self.monitors[loc.monitor].workspaces[loc.workspace];
+                    let ws = self.ws_mut(loc);
                     if !ws.is_floating(other) {
                         ws.swap(h, other);
                     }
                 }
-                Some(oloc) => self.transfer(h, loc, oloc.monitor),
-                None => {}
+                Some(Loc::Ws { monitor, .. }) => self.transfer(h, loc, monitor),
+                _ => {}
             },
             // Nothing to swap with: if a monitor lies that way, move onto it.
             None => {
-                if let Target::Dir(dir) = target {
+                if let (Target::Dir(dir), Loc::Ws { .. }) = (target, loc) {
                     if let Some(m) = self.monitor_towards(dir) {
                         self.transfer(h, loc, m);
                     }
@@ -618,7 +849,7 @@ impl<P: Platform> Wm<P> {
         let Some(h) = self.focused() else {
             return;
         };
-        let ws = self.current_workspace_mut();
+        let ws = self.current_ws_mut();
         let other = match ws.index_of(h) {
             Some(0) => ws.tiled.get(1).copied(),
             Some(_) => ws.tiled.first().copied(),
@@ -633,7 +864,7 @@ impl<P: Platform> Wm<P> {
         let Some(h) = self.focused() else {
             return;
         };
-        let ws = self.current_workspace_mut();
+        let ws = self.current_ws_mut();
         if let Some(i) = ws.index_of(h) {
             let (layout, count) = (ws.layout, ws.tiled.len());
             layout.resize(&mut ws.ratios, i, count, delta);
@@ -646,7 +877,7 @@ impl<P: Platform> Wm<P> {
         };
         let pos = self.settings.new_window;
         let mi = self.focused_monitor;
-        let ws = self.monitors[mi].workspace_mut();
+        let ws = self.current_ws_mut();
         if ws.is_floating(h) {
             ws.floating.retain(|x| *x != h);
             ws.insert(h, pos);
@@ -674,6 +905,7 @@ impl<P: Platform> Wm<P> {
             warn!(workspace = name, "no such workspace");
             return;
         };
+        self.special_focused = false;
         let mon = &self.monitors[mi];
         if target == mon.active {
             return;
@@ -696,25 +928,66 @@ impl<P: Platform> Wm<P> {
     }
 
     fn move_to_workspace(&mut self, name: &str) {
-        let mi = self.focused_monitor;
-        let (Some(h), Some(target)) = (self.focused(), self.monitors[mi].find_workspace(name))
-        else {
+        let Some(h) = self.focused() else {
             return;
         };
-        let mon = &mut self.monitors[mi];
-        if target == mon.active {
+        let (Some(from), Some(to)) = (self.locate(h), self.resolve(self.focused_monitor, name))
+        else {
+            warn!(workspace = name, "no such workspace");
+            return;
+        };
+        if from == to {
             return;
         }
-        let floating = mon.workspace().is_floating(h);
-        mon.workspace_mut().remove(h);
+        let floating = self.ws(from).is_floating(h);
+        self.ws_mut(from).remove(h);
         let pos = self.settings.new_window;
-        let dst = &mut mon.workspaces[target];
+        let dst = self.ws_mut(to);
         dst.add(h, floating, pos);
         dst.focused = Some(h);
         self.applied.remove(&h);
-        self.hide(h);
-        if let Some(next) = self.monitors[mi].workspace().focused {
-            self.focus_window(next);
+        if self.is_visible(to) {
+            // Still on screen (e.g. out of a shown special workspace): keep it focused.
+            self.show(h);
+            self.focus_window(h);
+        } else {
+            self.hide(h);
+            if let Some(next) = self.ws(from).focused {
+                self.focus_window(next);
+            }
+        }
+    }
+
+    fn toggle_special(&mut self, name: &str) {
+        let idx = self.special(name);
+        let shown = self.special_shown;
+        if let Some((current, _)) = shown {
+            for h in self.specials[current].windows().collect::<Vec<_>>() {
+                self.hide(h);
+            }
+            self.special_shown = None;
+            self.special_focused = false;
+            if current == idx {
+                if let Some(h) = self.monitors[self.focused_monitor].workspace().focused {
+                    self.focus_window(h);
+                }
+                return;
+            }
+        }
+        self.special_shown = Some((idx, self.focused_monitor));
+        self.special_focused = true;
+        let windows: Vec<_> = self.specials[idx].windows().collect();
+        if windows.is_empty() {
+            // An empty scratchpad is no use; open the terminal in it.
+            self.spawn_terminal();
+            return;
+        }
+        for h in windows {
+            self.applied.remove(&h);
+            self.show(h);
+        }
+        if let Some(h) = self.specials[idx].focused {
+            self.focus_window(h);
         }
     }
 
@@ -739,30 +1012,27 @@ impl<P: Platform> Wm<P> {
     /// Computes every visible workspace's layout and moves the windows whose
     /// slot changed since the last apply.
     pub fn apply(&mut self) {
-        let mut moves = Vec::new();
+        let mut slots = Vec::new();
         for m in &self.monitors {
-            let ws = m.workspace();
             let gaps = self.settings.gaps.scaled(m.info.scale);
-            let fullscreen = ws.fullscreen.filter(|h| ws.contains(*h));
-            let tiled: Vec<_> = ws
-                .tiled
-                .iter()
-                .copied()
-                .filter(|h| Some(*h) != fullscreen)
-                .collect();
-            let rects = ws
-                .layout
-                .arrange(tiled.len(), m.info.work_area, gaps, &ws.ratios);
-            let slots = tiled
-                .into_iter()
-                .zip(rects)
-                .chain(fullscreen.map(|h| (h, m.info.rect)));
-            for (h, rect) in slots {
-                if self.applied.get(&h) != Some(&rect) {
-                    moves.push((h, rect));
-                }
+            slots.extend(arrange(m.workspace(), m.info.work_area, m.info.rect, gaps));
+        }
+        if let Some((i, mi)) = self.special_shown {
+            if let Some(m) = self.monitors.get(mi) {
+                let area = m.info.work_area;
+                let (w, h) = (
+                    (area.w as f32 * SPECIAL_SCALE) as i32,
+                    (area.h as f32 * SPECIAL_SCALE) as i32,
+                );
+                let overlay = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
+                let gaps = self.settings.gaps.scaled(m.info.scale);
+                slots.extend(arrange(&self.specials[i], overlay, overlay, gaps));
             }
         }
+        let moves: Vec<_> = slots
+            .into_iter()
+            .filter(|(h, r)| self.applied.get(h) != Some(r))
+            .collect();
         if moves.is_empty() {
             return;
         }
@@ -799,4 +1069,21 @@ impl<P: Platform> Wm<P> {
             }
         }
     }
+}
+
+/// The target rect of every tiled (and fullscreen) window of a workspace.
+fn arrange(ws: &Workspace, area: Rect, full: Rect, gaps: Gaps) -> Vec<(WindowHandle, Rect)> {
+    let fullscreen = ws.fullscreen.filter(|h| ws.contains(*h));
+    let tiled: Vec<_> = ws
+        .tiled
+        .iter()
+        .copied()
+        .filter(|h| Some(*h) != fullscreen)
+        .collect();
+    let rects = ws.layout.arrange(tiled.len(), area, gaps, &ws.ratios);
+    tiled
+        .into_iter()
+        .zip(rects)
+        .chain(fullscreen.map(|h| (h, full)))
+        .collect()
 }

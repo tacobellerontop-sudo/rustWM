@@ -19,8 +19,14 @@ pub enum Event {
     WindowTitleChanged(WindowHandle),
     /// Monitors were added, removed or rearranged.
     DisplayChanged,
-    /// A command string, from a hotkey binding or the CLI.
+    /// A command string from a hotkey binding.
     Command(String),
+    /// A command from an IPC client, which waits until request `id` has been
+    /// handled before replying.
+    Request {
+        id: u64,
+        command: String,
+    },
     /// Stop the window manager and restore all windows.
     Shutdown,
 }

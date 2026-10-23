@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, w};
 
-use crate::{hotkeys, window};
+use crate::{hotkeys, tray, window};
 
 /// Where every callback sends its events. Set once by [`EventThread::spawn`];
 /// the callbacks are plain `extern "system"` functions with no user data.
@@ -95,6 +95,11 @@ unsafe extern "system" fn wnd_proc(
     match msg {
         WM_DISPLAYCHANGE => send(Event::DisplayChanged),
         WM_SETTINGCHANGE if wparam.0 as u32 == SPI_SETWORKAREA.0 => send(Event::DisplayChanged),
+        tray::WM_TRAY => {
+            tray::on_message(hwnd, (lparam.0 & 0xFFFF) as u32);
+            return LRESULT(0);
+        }
+        m if tray::is_taskbar_created(m) => tray::add(hwnd),
         _ => {}
     }
     // SAFETY: forwarding the arguments we were given.
@@ -197,8 +202,9 @@ fn run() {
         .collect();
     let keyboard = hotkeys::install();
     let hidden = create_hidden_window();
-    if hidden.is_none() {
-        warn!("could not create the hidden window; display changes will be missed");
+    match hidden {
+        Some(h) => tray::add(h),
+        None => warn!("could not create the hidden window; display changes will be missed"),
     }
     debug!(hooks = hooks.len(), "win32 event loop running");
 
@@ -213,6 +219,7 @@ fn run() {
             let _ = UnhookWinEvent(hook);
         }
         if let Some(h) = hidden {
+            tray::remove(h);
             let _ = DestroyWindow(h);
         }
         if let Some(k) = keyboard {
