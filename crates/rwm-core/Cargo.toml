@@ -1,0 +1,23 @@
+[package]
+name = "rwm-core"
+description = "Platform-independent state, layout and command logic for rustWM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Exposes `rwm_core::fake::FakePlatform` for tests in other crates.
+fake = []
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+rwm-core = { path = ".", features = ["fake"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "rwm-cli"
+description = "The rwm command-line client for rustWM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rwm"
+path = "src/main.rs"
+
+[dependencies]
+rwm-ipc.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
