@@ -13,6 +13,51 @@ pub enum InsertPos {
     Start,
 }
 
+/// How workspaces behave across monitors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkspaceMode {
+    /// Each monitor switches workspaces on its own.
+    #[default]
+    PerMonitor,
+    /// Switching a workspace switches every monitor, as if all monitors
+    /// were one big desktop.
+    Global,
+}
+
+impl WorkspaceMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            WorkspaceMode::PerMonitor => "per-monitor",
+            WorkspaceMode::Global => "global",
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            WorkspaceMode::PerMonitor => WorkspaceMode::Global,
+            WorkspaceMode::Global => WorkspaceMode::PerMonitor,
+        }
+    }
+}
+
+impl std::str::FromStr for WorkspaceMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        [WorkspaceMode::PerMonitor, WorkspaceMode::Global]
+            .into_iter()
+            .find(|m| m.name() == s)
+            .ok_or(())
+    }
+}
+
+impl std::fmt::Display for WorkspaceMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// An ordered list of tiled windows plus the layout that places them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Workspace {

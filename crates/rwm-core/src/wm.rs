@@ -7,7 +7,7 @@ use crate::geometry::Direction;
 use crate::layout::{Gaps, LayoutKind};
 use crate::rules::{self, Rule, Verdict};
 use crate::state::{MonitorState, State, WindowState, WorkspaceState};
-use crate::workspace::{InsertPos, Monitor, Workspace};
+use crate::workspace::{InsertPos, Monitor, Workspace, WorkspaceMode};
 use crate::{Event, Platform, Rect, WindowHandle, WindowInfo};
 
 /// Whether the event loop should keep running after an event.
@@ -28,6 +28,8 @@ pub struct Settings {
     pub default_layout: LayoutKind,
     /// Workspace names, created on every monitor.
     pub workspaces: Vec<String>,
+    /// Whether monitors switch workspaces together or on their own.
+    pub workspace_mode: WorkspaceMode,
     /// Command line for the `terminal` command; `None` tries `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
     pub rules: Vec<Rule>,
@@ -40,6 +42,7 @@ impl Default for Settings {
             new_window: InsertPos::AfterFocused,
             default_layout: LayoutKind::Dwindle,
             workspaces: (1..=9).map(|i| i.to_string()).collect(),
+            workspace_mode: WorkspaceMode::default(),
             terminal: None,
             rules: Vec::new(),
         }
@@ -185,6 +188,7 @@ impl<P: Platform> Wm<P> {
         for mi in 0..self.monitors.len() {
             self.resize_workspaces(mi, &names, layout);
         }
+        self.align_workspaces();
         self.applied.clear();
         self.apply();
     }
@@ -214,7 +218,13 @@ impl<P: Platform> Wm<P> {
             }
             Event::WindowMinimized(h) => self.unmanage(h),
             Event::WindowFocused(h) => {
-                self.set_focus_state(h);
+                if self.locate(h).is_some() {
+                    self.set_focus_state(h);
+                } else {
+                    // The desktop, the taskbar or an unmanaged window: the
+                    // user is working on the monitor under the mouse.
+                    self.focus_monitor_under_cursor();
+                }
                 return Flow::Continue;
             }
             Event::WindowMoveEnded(h) => self.window_dropped(h),
@@ -261,6 +271,12 @@ impl<P: Platform> Wm<P> {
             }
             Command::Retile => self.applied.clear(),
             Command::Workspace(name) => self.switch_workspace(&name),
+            Command::WorkspaceMode(mode) => {
+                let mode = mode.unwrap_or(self.settings.workspace_mode.toggled());
+                info!(%mode, "workspace mode");
+                self.settings.workspace_mode = mode;
+                self.align_workspaces();
+            }
             Command::MoveToWorkspace(name) => self.move_to_workspace(&name),
             Command::FocusMonitor(dir) => self.focus_monitor(dir),
             Command::MoveToMonitor(dir) => {
@@ -859,7 +875,52 @@ impl<P: Platform> Wm<P> {
         if let Some((i, m)) = self.special_shown {
             self.special_shown = Some((i, m.min(self.monitors.len() - 1)));
         }
+        self.align_workspaces();
         self.applied.clear();
+    }
+
+    /// In global mode, puts every monitor on the focused monitor's workspace.
+    fn align_workspaces(&mut self) {
+        if self.settings.workspace_mode != WorkspaceMode::Global || self.monitors.is_empty() {
+            return;
+        }
+        let target = self.monitors[self.focused_monitor].active;
+        for mi in 0..self.monitors.len() {
+            self.set_active(mi, target);
+        }
+    }
+
+    /// Shows workspace `target` on monitor `mi` and hides the one it replaces.
+    fn set_active(&mut self, mi: usize, target: usize) {
+        let mon = &self.monitors[mi];
+        if target == mon.active || target >= mon.workspaces.len() {
+            return;
+        }
+        let to_show: Vec<_> = mon.workspaces[target].windows().collect();
+        let to_hide: Vec<_> = mon.workspace().windows().collect();
+        // Show the new workspace before hiding the old one to avoid a flash
+        // of desktop between the two.
+        self.monitors[mi].active = target;
+        for h in to_show {
+            self.show(h);
+        }
+        for h in to_hide {
+            self.hide(h);
+        }
+    }
+
+    fn focus_monitor_under_cursor(&mut self) {
+        let Some((x, y)) = self.platform.cursor_pos() else {
+            return;
+        };
+        if let Some(m) = self
+            .monitors
+            .iter()
+            .position(|m| m.info.rect.contains_point(x, y))
+        {
+            self.focused_monitor = m;
+            self.special_focused = false;
+        }
     }
 
     // ---- commands -----------------------------------------------------------
@@ -1035,22 +1096,24 @@ impl<P: Platform> Wm<P> {
             return;
         };
         self.special_focused = false;
-        let mon = &self.monitors[mi];
-        if target == mon.active {
+        if target == self.monitors[mi].active {
             return;
         }
-        let to_show: Vec<_> = mon.workspaces[target].windows().collect();
-        let to_hide: Vec<_> = mon.workspace().windows().collect();
-        // Show the new workspace before hiding the old one to avoid a flash
-        // of desktop between the two.
-        self.monitors[mi].active = target;
-        for h in to_show {
-            self.show(h);
+        match self.settings.workspace_mode {
+            WorkspaceMode::PerMonitor => self.set_active(mi, target),
+            WorkspaceMode::Global => {
+                for m in 0..self.monitors.len() {
+                    self.set_active(m, target);
+                }
+            }
         }
-        for h in to_hide {
-            self.hide(h);
-        }
-        match self.monitors[mi].workspace().focused {
+        let focus = self.monitors[mi].workspace().focused.or_else(|| {
+            // Global mode: if this monitor's half is empty, focus another's.
+            (self.settings.workspace_mode == WorkspaceMode::Global)
+                .then(|| self.monitors.iter().find_map(|m| m.workspace().focused))
+                .flatten()
+        });
+        match focus {
             Some(h) => self.focus_window(h),
             None => debug!(workspace = name, "switched to empty workspace"),
         }

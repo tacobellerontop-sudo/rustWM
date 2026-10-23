@@ -53,6 +53,7 @@ broken file is reported in the log and the previous config keeps running.
 default_layout = "dwindle"       # dwindle | master | monocle
 new_window = "after-focused"     # after-focused | end | start
 workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+workspace_mode = "per-monitor"   # per-monitor | global (Win+Alt+W toggles)
 terminal = "wezterm-gui.exe"     # Win+Enter; defaults to wt.exe, then cmd.exe
 
 [gaps]
@@ -88,6 +89,20 @@ actions = ["tile"]               # always tile it, even if it looks fixed-size
 
 Tiling a floated window yourself (Win + F) also keeps it tiled.
 
+### Workspaces on several monitors
+
+Every monitor has its own copy of workspaces 1–9. `workspace_mode` decides how they switch:
+
+- **per-monitor** (default): Win + 1…9 switches only the monitor you're on. That's the
+  monitor of the focused window, or the one under the mouse after you click its desktop
+  or taskbar. New windows open on that monitor too.
+- **global**: Win + 1…9 switches every monitor at once, so all your screens act as one big
+  desktop. Windows stay on the monitor they're on; sending a window to workspace 3 keeps it
+  on its monitor's half of workspace 3.
+
+Win + Alt + W (`workspace-mode toggle`) flips between them until the next reload;
+set `workspace_mode` in the config to keep it.
+
 ### Resizing with the mouse
 
 Drag the edge of a tiled window to resize it; its neighbours follow and the split is
@@ -102,7 +117,7 @@ freely.
 | Win + H/J/K/L or arrows | focus left / down / up / right (crosses monitors) |
 | Win + Shift + H/J/K/L or arrows | move (swap) left / down / up / right |
 | Win + N / P | focus next / previous |
-| Win + 1…9 | switch workspace |
+| Win + 1…9 | switch workspace (this monitor, or all of them in global mode) |
 | Win + Shift + 1…9 | send window to workspace |
 | Win + Ctrl + Left/Right | focus monitor |
 | Win + Ctrl + Shift + Left/Right | send window to monitor |
@@ -116,6 +131,7 @@ freely.
 | Win + ` / Win + Shift + ` | toggle the scratchpad / send window to it |
 | Win + Alt + R | resize mode: H/J/K/L or arrows, Esc or Enter to leave |
 | Win + Ctrl + R | retile |
+| Win + Alt + W | toggle global / per-monitor workspaces |
 | Win + Ctrl + Shift + Q | quit and restore all windows |
 
 Dragging a tiled window onto another swaps them; dropping it on another monitor moves it
@@ -126,6 +142,7 @@ there.
 Bindings and `rwm <command>` use one command language:
 `focus <dir|next|prev>`, `move <dir|next|prev>`, `promote`, `close`, `terminal`,
 `exec <command line>`, `workspace <name|n>`, `move-to-workspace <name|n>`,
+`workspace-mode <global|per-monitor|toggle>`,
 `focus-monitor <dir>`, `move-to-monitor <dir>`, `layout <dwindle|master|monocle|reset>`,
 `cycle-layout`, `resize <grow|shrink> [amount]`, `toggle-float`, `toggle-fullscreen`,
 `toggle-special [name]`, `mode <name>`, `retile`, `reload`, `restore`, `quit`.

@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 use crate::geometry::Direction;
 use crate::layout::LayoutKind;
+use crate::workspace::WorkspaceMode;
 
 /// The special workspace `toggle-special` uses when no name is given.
 pub const DEFAULT_SPECIAL: &str = "scratch";
@@ -35,8 +36,11 @@ pub enum Command {
     Exec(String),
     /// Recompute and reapply every layout.
     Retile,
-    /// `workspace <name|number>`: switch the focused monitor to a workspace.
+    /// `workspace <name|number>`: switch the focused monitor (or, in global
+    /// mode, every monitor) to a workspace.
     Workspace(String),
+    /// `workspace-mode global|per-monitor|toggle`; `None` toggles.
+    WorkspaceMode(Option<WorkspaceMode>),
     /// `move-to-workspace <name|number>`: send the focused window there.
     MoveToWorkspace(String),
     /// `focus-monitor <dir>`
@@ -181,6 +185,15 @@ impl FromStr for Command {
             "restore" => no_arg("restore", rest, Command::Restore),
             "quit" => no_arg("quit", rest, Command::Quit),
             "workspace" => name_arg("workspace", rest).map(Command::Workspace),
+            "workspace-mode" if rest == "toggle" => Ok(Command::WorkspaceMode(None)),
+            "workspace-mode" => rest
+                .parse()
+                .map(|m| Command::WorkspaceMode(Some(m)))
+                .map_err(|()| ParseError::BadArgument {
+                    cmd: "workspace-mode",
+                    expected: "global, per-monitor or toggle",
+                    got: rest.into(),
+                }),
             "move-to-workspace" => {
                 name_arg("move-to-workspace", rest).map(Command::MoveToWorkspace)
             }
@@ -237,6 +250,8 @@ impl fmt::Display for Command {
             Command::Exec(c) => write!(f, "exec {c}"),
             Command::Retile => f.write_str("retile"),
             Command::Workspace(n) => write!(f, "workspace {n}"),
+            Command::WorkspaceMode(Some(m)) => write!(f, "workspace-mode {m}"),
+            Command::WorkspaceMode(None) => f.write_str("workspace-mode toggle"),
             Command::MoveToWorkspace(n) => write!(f, "move-to-workspace {n}"),
             Command::FocusMonitor(d) => write!(f, "focus-monitor {d}"),
             Command::MoveToMonitor(d) => write!(f, "move-to-monitor {d}"),
@@ -281,6 +296,9 @@ mod tests {
             "workspace 3",
             "workspace web",
             "move-to-workspace 9",
+            "workspace-mode global",
+            "workspace-mode per-monitor",
+            "workspace-mode toggle",
             "focus-monitor left",
             "move-to-monitor right",
             "layout master",
@@ -330,6 +348,8 @@ mod tests {
             "resize grow 2",
             "resize up",
             "focus-monitor next",
+            "workspace-mode",
+            "workspace-mode both",
             "mode",
         ] {
             assert!(

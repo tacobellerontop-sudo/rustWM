@@ -12,6 +12,10 @@ default_layout = "dwindle"
 new_window = "after-focused"
 # Workspace names (1 to 9), created on every monitor.
 workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+# "per-monitor": each monitor switches workspaces on its own (Win+1 changes
+# only the monitor you're on). "global": all monitors switch together, as one
+# big desktop. Win+Alt+W toggles between them.
+workspace_mode = "per-monitor"
 # Command launched by the "terminal" command (Win+Enter). Any exe plus args,
 # e.g. "wezterm-gui.exe", "alacritty.exe" or "pwsh.exe". When unset, rustWM
 # tries wt.exe, then cmd.exe.
@@ -57,6 +61,7 @@ smart = true   # no gaps when a workspace has a single window
 "win+grave" = "toggle-special scratch"
 "win+shift+grave" = "move-to-workspace special:scratch"
 "win+ctrl+r" = "retile"
+"win+alt+w" = "workspace-mode toggle"
 "win+ctrl+shift+q" = "quit"
 "win+ctrl+left" = "focus-monitor left"
 "win+ctrl+right" = "focus-monitor right"

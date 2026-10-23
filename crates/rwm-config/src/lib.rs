@@ -10,7 +10,7 @@ use rwm_core::Command;
 use rwm_core::layout::{Gaps, LayoutKind};
 use rwm_core::rules::{Rule, RuleAction};
 use rwm_core::wm::{DEFAULT_MODE, Settings};
-use rwm_core::workspace::InsertPos;
+use rwm_core::workspace::{InsertPos, WorkspaceMode};
 use serde::Deserialize;
 
 pub use keys::{Chord, KeyError};
@@ -39,6 +39,7 @@ pub struct General {
     pub default_layout: LayoutKind,
     pub new_window: InsertPos,
     pub workspaces: Vec<String>,
+    pub workspace_mode: WorkspaceMode,
     /// Command line launched by the `terminal` command. `None` falls back to
     /// `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
@@ -51,6 +52,7 @@ impl Default for General {
             default_layout: s.default_layout,
             new_window: s.new_window,
             workspaces: s.workspaces,
+            workspace_mode: s.workspace_mode,
             terminal: None,
         }
     }
@@ -303,6 +305,7 @@ impl Config {
                 new_window: self.general.new_window,
                 default_layout: self.general.default_layout,
                 workspaces: self.general.workspaces,
+                workspace_mode: self.general.workspace_mode,
                 terminal: self.general.terminal.map(|t| t.trim().to_string()),
                 rules,
             },
@@ -356,6 +359,7 @@ mod tests {
             default_layout = "master"
             new_window = "end"
             workspaces = ["web", "code"]
+            workspace_mode = "global"
             terminal = "wezterm-gui.exe"
 
             [gaps]
@@ -378,6 +382,8 @@ mod tests {
         assert_eq!(s.default_layout, LayoutKind::Master);
         assert_eq!(s.new_window, InsertPos::End);
         assert_eq!(s.workspaces, vec!["web", "code"]);
+        assert_eq!(s.workspace_mode, WorkspaceMode::Global);
+        assert!(parse("[general]\nworkspace_mode = \"both\"").is_err());
         assert_eq!(s.terminal.as_deref(), Some("wezterm-gui.exe"));
         assert_eq!(
             s.gaps,
