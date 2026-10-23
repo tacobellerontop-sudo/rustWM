@@ -9,12 +9,7 @@ use tracing_subscriber::EnvFilter;
     version,
     about = "The rustWM tiling window manager daemon"
 )]
-struct Args {
-    /// Keep every window tiled in equal columns on the primary monitor
-    /// (M1 debug mode, until real layouts land).
-    #[arg(long)]
-    debug_tile: bool,
-}
+struct Args {}
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -27,9 +22,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-fn run(args: Args) -> anyhow::Result<()> {
-    use rwm_core::wm::Flow;
-    use rwm_core::{Event, Wm};
+fn run(_args: Args) -> anyhow::Result<()> {
+    use rwm_core::Wm;
+    use rwm_core::wm::{Flow, Settings};
 
     rwm_win32::enable_dpi_awareness();
 
@@ -41,16 +36,20 @@ fn run(args: Args) -> anyhow::Result<()> {
         default_hook(info);
     }));
 
+    let config = rwm_config::Config::default();
+    let settings = Settings {
+        terminal: config.general.terminal,
+        ..Settings::default()
+    };
+    rwm_win32::set_bindings(rwm_config::default_bindings());
+
     let (tx, rx) = std::sync::mpsc::channel();
-    let events = rwm_win32::EventThread::spawn(tx.clone())?;
+    let events = rwm_win32::EventThread::spawn(tx)?;
     rwm_win32::install_ctrl_handler();
 
-    let mut wm = Wm::new(rwm_win32::Win32Platform::new());
+    let mut wm = Wm::with_settings(rwm_win32::Win32Platform::new(), settings);
     wm.start()?;
-    if args.debug_tile {
-        tx.send(Event::Command("debug-tile".into()))?;
-    }
-    tracing::info!("rustWM running; press Ctrl+C to quit");
+    tracing::info!("rustWM running; Win+Ctrl+Shift+Q or Ctrl+C to quit");
 
     for event in rx {
         if wm.handle(event) == Flow::Exit {

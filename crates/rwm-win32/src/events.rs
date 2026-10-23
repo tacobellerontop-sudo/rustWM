@@ -1,5 +1,5 @@
-//! The Win32 thread: WinEvent hooks and display-change notifications, turned
-//! into [`Event`]s for the core thread.
+//! The Win32 thread: WinEvent hooks, the keyboard hook and display-change
+//! notifications, turned into [`Event`]s for the core thread.
 
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
@@ -25,13 +25,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, w};
 
-use crate::window;
+use crate::{hotkeys, window};
 
 /// Where every callback sends its events. Set once by [`EventThread::spawn`];
 /// the callbacks are plain `extern "system"` functions with no user data.
 static SENDER: OnceLock<Sender<Event>> = OnceLock::new();
 
-fn send(event: Event) {
+pub(crate) fn send(event: Event) {
     if let Some(tx) = SENDER.get() {
         // The receiver is gone only during shutdown; nothing to do then.
         let _ = tx.send(event);
@@ -195,6 +195,7 @@ fn run() {
             }
         })
         .collect();
+    let keyboard = hotkeys::install();
     let hidden = create_hidden_window();
     if hidden.is_none() {
         warn!("could not create the hidden window; display changes will be missed");
@@ -213,6 +214,9 @@ fn run() {
         }
         if let Some(h) = hidden {
             let _ = DestroyWindow(h);
+        }
+        if let Some(k) = keyboard {
+            hotkeys::uninstall(k);
         }
     }
     debug!("win32 event loop stopped");

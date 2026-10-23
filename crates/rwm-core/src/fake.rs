@@ -16,6 +16,7 @@ pub enum Call {
     Show(WindowHandle),
     Hide(WindowHandle),
     Focus(WindowHandle),
+    Close(WindowHandle),
     Spawn(String),
 }
 
@@ -28,6 +29,8 @@ pub struct FakePlatform {
     pub hidden: Vec<WindowHandle>,
     pub foreground: Option<WindowHandle>,
     pub calls: Vec<Call>,
+    /// Command lines starting with any of these fail to spawn.
+    pub failing_spawns: Vec<String>,
 }
 
 impl FakePlatform {
@@ -43,6 +46,19 @@ impl FakePlatform {
             }],
             ..Self::default()
         }
+    }
+
+    /// Two 1920x1080 monitors side by side; the left one is primary.
+    pub fn dual_monitor() -> Self {
+        let mut p = Self::single_monitor();
+        p.monitors.push(MonitorInfo {
+            id: r"\\.\DISPLAY2".into(),
+            rect: Rect::new(1920, 0, 1920, 1080),
+            work_area: Rect::new(1920, 0, 1920, 1080),
+            scale: 1.0,
+            primary: false,
+        });
+        p
     }
 
     /// Adds a normal, manageable app window and returns its handle.
@@ -74,6 +90,13 @@ impl FakePlatform {
 
     pub fn is_hidden(&self, handle: WindowHandle) -> bool {
         self.hidden.contains(&handle)
+    }
+
+    /// Places a window, as if the user dragged it there.
+    pub fn place(&mut self, handle: WindowHandle, rect: Rect) {
+        if let Some(w) = self.windows.get_mut(&handle) {
+            w.rect = rect;
+        }
     }
 
     pub fn rect_of(&self, handle: WindowHandle) -> Option<Rect> {
@@ -135,8 +158,24 @@ impl Platform for FakePlatform {
         Ok(())
     }
 
+    fn close(&mut self, handle: WindowHandle) -> Result<()> {
+        self.calls.push(Call::Close(handle));
+        self.get_mut(handle)?;
+        Ok(())
+    }
+
     fn spawn(&mut self, command_line: &str) -> Result<()> {
         self.calls.push(Call::Spawn(command_line.into()));
+        if self
+            .failing_spawns
+            .iter()
+            .any(|p| command_line.starts_with(p.as_str()))
+        {
+            return Err(PlatformError::Spawn {
+                cmd: command_line.into(),
+                reason: "not found".into(),
+            });
+        }
         Ok(())
     }
 }

@@ -8,6 +8,8 @@ mod events;
 #[cfg(windows)]
 mod hidden;
 #[cfg(windows)]
+mod hotkeys;
+#[cfg(windows)]
 mod monitor;
 #[cfg(windows)]
 mod platform;
@@ -18,5 +20,7 @@ mod window;
 pub use events::{EventThread, install_ctrl_handler};
 #[cfg(windows)]
 pub use hidden::restore_hidden_windows;
+#[cfg(windows)]
+pub use hotkeys::set_bindings;
 #[cfg(windows)]
 pub use platform::{Win32Platform, enable_dpi_awareness};

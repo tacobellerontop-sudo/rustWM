@@ -57,6 +57,9 @@ pub trait Platform {
 
     fn focus(&mut self, handle: WindowHandle) -> Result<()>;
 
+    /// Politely asks a window to close (like clicking its close button).
+    fn close(&mut self, handle: WindowHandle) -> Result<()>;
+
     /// Launches a command line detached from the window manager.
     fn spawn(&mut self, command_line: &str) -> Result<()>;
 }

@@ -5,18 +5,21 @@
 //! core can be driven by [`fake::FakePlatform`] in tests on any OS.
 
 pub mod cmdline;
+pub mod command;
 pub mod event;
 pub mod geometry;
 pub mod layout;
 pub mod platform;
 pub mod window;
 pub mod wm;
+pub mod workspace;
 
 #[cfg(feature = "fake")]
 pub mod fake;
 
+pub use command::Command;
 pub use event::Event;
-pub use geometry::Rect;
+pub use geometry::{Direction, Rect};
 pub use platform::{MonitorInfo, Platform, PlatformError};
 pub use window::{WindowHandle, WindowInfo};
 pub use wm::Wm;

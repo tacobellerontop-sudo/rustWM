@@ -1,4 +1,41 @@
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl FromStr for Direction {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            "up" => Ok(Self::Up),
+            "down" => Ok(Self::Down),
+            _ => Err(()),
+        }
+    }
+}
+
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Up => "up",
+            Self::Down => "down",
+        })
+    }
+}
 
 /// An axis-aligned rectangle in physical pixels.
 ///
@@ -48,6 +85,48 @@ impl Rect {
         )
     }
 
+    /// Distance from this rect to `other` along `dir`, if `other` lies in
+    /// that direction (its centre is past ours). Used for geometric focus.
+    fn distance_towards(&self, other: &Rect, dir: Direction) -> Option<(bool, i32, i32)> {
+        let (cx, cy) = self.center();
+        let (ox, oy) = other.center();
+        // (overlaps on the perpendicular axis, gap along dir, centre offset across)
+        let overlap_y = other.y < self.bottom() && self.y < other.bottom();
+        let overlap_x = other.x < self.right() && self.x < other.right();
+        match dir {
+            Direction::Left if ox < cx => {
+                Some((overlap_y, (self.x - other.right()).max(0), (oy - cy).abs()))
+            }
+            Direction::Right if ox > cx => {
+                Some((overlap_y, (other.x - self.right()).max(0), (oy - cy).abs()))
+            }
+            Direction::Up if oy < cy => {
+                Some((overlap_x, (self.y - other.bottom()).max(0), (ox - cx).abs()))
+            }
+            Direction::Down if oy > cy => {
+                Some((overlap_x, (other.y - self.bottom()).max(0), (ox - cx).abs()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Picks the candidate nearest to this rect in `dir`: windows that overlap
+    /// on the other axis win, then the smallest gap, then the best alignment.
+    pub fn nearest<T: Copy>(
+        &self,
+        dir: Direction,
+        candidates: impl IntoIterator<Item = (T, Rect)>,
+    ) -> Option<T> {
+        candidates
+            .into_iter()
+            .filter_map(|(id, r)| {
+                self.distance_towards(&r, dir)
+                    .map(|(overlap, gap, off)| ((!overlap, gap, off), id))
+            })
+            .min_by_key(|(key, _)| *key)
+            .map(|(_, id)| id)
+    }
+
     /// Splits horizontally (side by side) at `ratio` of the width.
     pub fn split_h(&self, ratio: f32) -> (Self, Self) {
         let left = (self.w as f32 * ratio).round() as i32;
@@ -90,6 +169,26 @@ mod tests {
     #[test]
     fn inset_never_goes_negative() {
         assert_eq!(Rect::new(0, 0, 10, 10).inset(8), Rect::new(8, 8, 0, 0));
+    }
+
+    #[test]
+    fn nearest_prefers_overlapping_neighbour() {
+        // Focused window on the left half; right half split top/bottom.
+        let focused = Rect::new(0, 0, 960, 1080);
+        let top = Rect::new(960, 0, 960, 540);
+        let bottom = Rect::new(960, 540, 960, 540);
+        let far = Rect::new(3000, 0, 100, 100);
+        let pick = focused.nearest(Direction::Right, [(1, top), (2, bottom), (3, far)]);
+        assert_eq!(pick, Some(1));
+        assert_eq!(
+            bottom.nearest(Direction::Up, [(1, top), (0, focused)]),
+            Some(1)
+        );
+        assert_eq!(top.nearest(Direction::Left, [(0, focused)]), Some(0));
+        assert_eq!(
+            focused.nearest(Direction::Left, [(1, top), (2, bottom)]),
+            None
+        );
     }
 
     #[test]

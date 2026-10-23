@@ -9,9 +9,9 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, IsIconic, IsZoomed, SW_HIDE, SW_RESTORE, SW_SHOWNA, SWP_ASYNCWINDOWPOS,
-    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
-    ShowWindowAsync,
+    GetForegroundWindow, IsIconic, IsZoomed, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOWNA,
+    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetForegroundWindow,
+    SetWindowPos, ShowWindowAsync, WM_CLOSE,
 };
 
 use crate::{hidden, monitor, window};
@@ -165,6 +165,13 @@ impl Platform for Win32Platform {
             }
         }
         Ok(())
+    }
+
+    fn close(&mut self, handle: WindowHandle) -> Result<()> {
+        let hwnd = self.checked(handle)?;
+        // SAFETY: validated handle; PostMessage never blocks on the target.
+        unsafe { PostMessageW(Some(hwnd), WM_CLOSE, Default::default(), Default::default()) }
+            .map_err(|e| PlatformError::Os(e.to_string()))
     }
 
     fn spawn(&mut self, command_line: &str) -> Result<()> {

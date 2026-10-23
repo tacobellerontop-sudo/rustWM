@@ -253,7 +253,9 @@ dependencies = [
 name = "rwm-config"
 version = "0.0.1"
 dependencies = [
+ "rwm-core",
  "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -278,6 +280,7 @@ dependencies = [
 name = "rwm-win32"
 version = "0.0.1"
 dependencies = [
+ "rwm-config",
  "rwm-core",
  "tracing",
  "windows",

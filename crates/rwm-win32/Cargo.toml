@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 rwm-core.workspace = true
+rwm-config.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
