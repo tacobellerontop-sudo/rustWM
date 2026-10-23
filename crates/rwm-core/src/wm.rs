@@ -8,7 +8,7 @@ use crate::layout::{Gaps, LayoutKind};
 use crate::rules::{self, Rule, Verdict};
 use crate::state::{MonitorState, State, WindowState, WorkspaceState};
 use crate::workspace::{InsertPos, Monitor, Workspace, WorkspaceMode};
-use crate::{Event, Platform, Rect, WindowHandle, WindowInfo};
+use crate::{Border, Event, Platform, Rect, WindowHandle, WindowInfo};
 
 /// Whether the event loop should keep running after an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +18,26 @@ pub enum Flow {
     /// pass it to [`Wm::set_settings`].
     Reload,
     Exit,
+}
+
+/// The focus border's look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorderSettings {
+    pub enabled: bool,
+    /// Thickness at 100% scaling; scaled per monitor.
+    pub width: i32,
+    /// 0xRRGGBB.
+    pub color: u32,
+}
+
+impl Default for BorderSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            width: 3,
+            color: 0x89b4fa,
+        }
+    }
 }
 
 /// User-tunable behaviour, filled from the config file.
@@ -30,6 +50,9 @@ pub struct Settings {
     pub workspaces: Vec<String>,
     /// Whether monitors switch workspaces together or on their own.
     pub workspace_mode: WorkspaceMode,
+    /// Focus the window under the mouse when the mouse moves onto it.
+    pub focus_follows_mouse: bool,
+    pub border: BorderSettings,
     /// Command line for the `terminal` command; `None` tries `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
     pub rules: Vec<Rule>,
@@ -43,6 +66,8 @@ impl Default for Settings {
             default_layout: LayoutKind::Dwindle,
             workspaces: (1..=9).map(|i| i.to_string()).collect(),
             workspace_mode: WorkspaceMode::default(),
+            focus_follows_mouse: false,
+            border: BorderSettings::default(),
             terminal: None,
             rules: Vec::new(),
         }
@@ -108,6 +133,10 @@ pub struct Wm<P: Platform> {
     force_tiled: BTreeSet<WindowHandle>,
     /// Windows were moved and should be checked with [`Event::Verify`].
     verify_pending: bool,
+    /// The window the user is dragging, if any.
+    moving: Option<WindowHandle>,
+    /// The border as last drawn.
+    border: Option<Border>,
 }
 
 impl<P: Platform> Wm<P> {
@@ -130,6 +159,8 @@ impl<P: Platform> Wm<P> {
             meta: HashMap::new(),
             force_tiled: BTreeSet::new(),
             verify_pending: false,
+            moving: None,
+            border: None,
         }
     }
 
@@ -172,6 +203,7 @@ impl<P: Platform> Wm<P> {
         }
         info!(count = self.all_windows().count(), "windows adopted");
         self.apply();
+        self.update_border();
         Ok(())
     }
 
@@ -189,6 +221,17 @@ impl<P: Platform> Wm<P> {
     }
 
     pub fn handle(&mut self, event: Event) -> Flow {
+        let flow = self.handle_inner(event);
+        if flow == Flow::Exit {
+            self.border = None;
+            self.platform.set_border(None);
+        } else {
+            self.update_border();
+        }
+        flow
+    }
+
+    fn handle_inner(&mut self, event: Event) -> Flow {
         debug!(?event, "event");
         match event {
             Event::WindowShown(h) | Event::WindowRestored(h) => self.maybe_manage(h),
@@ -222,7 +265,18 @@ impl<P: Platform> Wm<P> {
                 }
                 return Flow::Continue;
             }
-            Event::WindowMoveEnded(h) => self.window_dropped(h),
+            Event::WindowMoveStarted(h) => {
+                self.moving = Some(h);
+                return Flow::Continue;
+            }
+            Event::WindowMoveEnded(h) => {
+                self.moving = None;
+                self.window_dropped(h);
+            }
+            Event::MouseOver(h) => {
+                self.mouse_over(h);
+                return Flow::Continue;
+            }
             Event::DisplayChanged => self.refresh_monitors(),
             Event::Command(cmd) | Event::Request { command: cmd, .. } => {
                 match cmd.parse::<Command>() {
@@ -572,6 +626,69 @@ impl<P: Platform> Wm<P> {
                 warn!(error = %e, "could not place floating window");
             }
         }
+    }
+
+    /// Focus follows mouse: focus `h` if it is a visible managed window and
+    /// the user isn't busy with something else (a menu, the Start menu).
+    fn mouse_over(&mut self, h: WindowHandle) {
+        if !self.settings.focus_follows_mouse || self.moving.is_some() || self.focused() == Some(h)
+        {
+            return;
+        }
+        if !self.locate(h).is_some_and(|loc| self.is_visible(loc)) {
+            return;
+        }
+        if let Some(fg) = self.platform.foreground() {
+            let managed = self.locate(fg).is_some();
+            let desktop = self
+                .platform
+                .window_info(fg)
+                .is_some_and(|w| matches!(w.class.as_str(), "Progman" | "WorkerW"));
+            if !managed && !desktop {
+                return;
+            }
+        }
+        self.focus_window(h);
+    }
+
+    /// Draws the border around the focused window, or hides it when no
+    /// managed window has the foreground.
+    fn update_border(&mut self) {
+        let want = self.border_target();
+        if want != self.border {
+            self.border = want;
+            self.platform.set_border(want);
+        }
+    }
+
+    fn border_target(&self) -> Option<Border> {
+        let b = self.settings.border;
+        if !b.enabled || b.width <= 0 || self.monitors.is_empty() {
+            return None;
+        }
+        let h = self.focused()?;
+        if self.moving == Some(h) || self.platform.foreground() != Some(h) {
+            return None;
+        }
+        let loc = self.locate(h)?;
+        if !self.is_visible(loc) || self.ws(loc).fullscreen == Some(h) {
+            return None;
+        }
+        let rect = match self.applied.get(&h) {
+            Some(r) if !self.ws(loc).is_floating(h) => *r,
+            _ => self.platform.window_info(h)?.rect,
+        };
+        let mi = match loc {
+            Loc::Ws { monitor, .. } => monitor,
+            Loc::Special(_) => self.special_shown.map_or(self.focused_monitor, |(_, m)| m),
+        };
+        let scale = self.monitors.get(mi).map_or(1.0, |m| m.info.scale);
+        Some(Border {
+            window: h,
+            rect,
+            width: ((b.width as f32 * scale).round() as i32).max(1),
+            color: b.color,
+        })
     }
 
     /// Whether windows were moved since the last call, so the caller should

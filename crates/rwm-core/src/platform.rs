@@ -16,6 +16,18 @@ pub struct MonitorInfo {
     pub primary: bool,
 }
 
+/// The coloured frame drawn around the focused window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Border {
+    pub window: WindowHandle,
+    /// The window's visible frame; the border is drawn just inside it.
+    pub rect: Rect,
+    /// Thickness in physical pixels.
+    pub width: i32,
+    /// 0xRRGGBB.
+    pub color: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
     #[error("window {0:?} no longer exists")]
@@ -65,4 +77,7 @@ pub trait Platform {
 
     /// Launches a command line detached from the window manager.
     fn spawn(&mut self, command_line: &str) -> Result<()>;
+
+    /// Draws the focus border, or hides it with `None`.
+    fn set_border(&mut self, border: Option<Border>);
 }

@@ -181,6 +181,10 @@ impl Platform for Win32Platform {
         unsafe { GetCursorPos(&mut p) }.ok().map(|_| (p.x, p.y))
     }
 
+    fn set_border(&mut self, border: Option<rwm_core::Border>) {
+        crate::border::update(border);
+    }
+
     fn spawn(&mut self, command_line: &str) -> Result<()> {
         let spawn_err = |reason: String| PlatformError::Spawn {
             cmd: command_line.into(),

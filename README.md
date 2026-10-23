@@ -69,6 +69,7 @@ default_layout = "dwindle"       # dwindle | master | monocle
 new_window = "after-focused"     # after-focused | end | start
 workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 workspace_mode = "per-monitor"   # per-monitor | global (Win+Alt+W toggles)
+focus_follows_mouse = false      # focus windows by hovering, no click needed
 terminal = "wezterm-gui.exe"     # Win+Enter; defaults to wt.exe, then cmd.exe
 hotkeys = "kerys.exe"            # hotkey daemon to start; "" for none
 
@@ -76,6 +77,11 @@ hotkeys = "kerys.exe"            # hotkey daemon to start; "" for none
 inner = 8
 outer = 8
 smart = true
+
+[border]                         # frame around the focused window
+enabled = true
+width = 3
+color = "#89b4fa"
 
 [[rules]]
 match = { exe = "Spotify.exe" }  # exe/class: whole-value regex; title: regex search
@@ -115,6 +121,15 @@ Every monitor has its own copy of workspaces 1–9. `workspace_mode` decides how
 
 Win + Alt + W (`workspace-mode toggle`) flips between them until the next reload;
 set `workspace_mode` in the config to keep it.
+
+### Focus border and focus follows mouse
+
+The focused window gets a coloured frame just inside its edge (`[border]`: `enabled`,
+`width` in pixels at 100% scale, `color` as `#rrggbb`). It hides while you drag a window,
+for fullscreen windows, and while something else like the Start menu has focus.
+
+With `focus_follows_mouse = true`, resting the mouse on a window for a moment focuses it.
+It leaves menus and the Start menu alone, and does nothing while a mouse button is held.
 
 ### Resizing with the mouse
 

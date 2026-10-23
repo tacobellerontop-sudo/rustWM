@@ -123,6 +123,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         );
     }
     rwm_win32::set_config_path(config_path.clone());
+    rwm_win32::set_focus_follows_mouse(loaded.settings.focus_follows_mouse);
 
     let (tx, rx) = std::sync::mpsc::channel();
     let events = rwm_win32::EventThread::spawn(tx.clone())?;
@@ -173,6 +174,7 @@ fn run(args: Args) -> anyhow::Result<()> {
             match rwm_config::load(&config_path) {
                 Ok(loaded) => {
                     shared.set_config(&config_path);
+                    rwm_win32::set_focus_follows_mouse(loaded.settings.focus_follows_mouse);
                     wm.set_settings(loaded.settings);
                     tracing::info!("config reloaded");
                 }

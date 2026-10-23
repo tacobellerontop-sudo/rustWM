@@ -6,11 +6,15 @@
 #[cfg(windows)]
 pub mod autostart;
 #[cfg(windows)]
+mod border;
+#[cfg(windows)]
 mod events;
 #[cfg(windows)]
 mod hidden;
 #[cfg(windows)]
 mod hotkeys;
+#[cfg(windows)]
+mod hover;
 #[cfg(windows)]
 mod monitor;
 #[cfg(windows)]
@@ -28,6 +32,8 @@ pub use events::{EventThread, install_ctrl_handler};
 pub use hidden::restore_hidden_windows;
 #[cfg(windows)]
 pub use hotkeys::HotkeyDaemon;
+#[cfg(windows)]
+pub use hover::set_focus_follows_mouse;
 #[cfg(windows)]
 pub use platform::{Win32Platform, enable_dpi_awareness};
 #[cfg(windows)]
