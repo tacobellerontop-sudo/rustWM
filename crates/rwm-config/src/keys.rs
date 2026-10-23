@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// A modifier set plus one Windows virtual-key code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Chord {
     pub win: bool,
     pub ctrl: bool,

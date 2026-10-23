@@ -15,6 +15,7 @@ fake = []
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 rwm-core = { path = ".", features = ["fake"] }

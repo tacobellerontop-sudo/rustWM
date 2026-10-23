@@ -10,6 +10,7 @@ pub mod event;
 pub mod geometry;
 pub mod layout;
 pub mod platform;
+pub mod rules;
 pub mod window;
 pub mod wm;
 pub mod workspace;

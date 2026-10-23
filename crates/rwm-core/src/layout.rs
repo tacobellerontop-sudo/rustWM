@@ -72,13 +72,69 @@ pub enum LayoutKind {
     /// previous one, splitting along the longer side.
     #[default]
     Dwindle,
+    /// komorebi/dwm style: one master window on the left at the master ratio,
+    /// the rest stacked on the right.
+    Master,
+    /// Every window fills the work area; the focused one is on top.
+    Monocle,
 }
 
 impl LayoutKind {
+    pub const ALL: [LayoutKind; 3] = [LayoutKind::Dwindle, LayoutKind::Master, LayoutKind::Monocle];
+
     pub fn arrange(self, count: usize, area: Rect, gaps: Gaps, ratios: &Ratios) -> Vec<Rect> {
         match self {
             LayoutKind::Dwindle => dwindle(count, area, gaps, ratios),
+            LayoutKind::Master => master(count, area, gaps, ratios),
+            LayoutKind::Monocle => monocle(count, area, gaps),
         }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LayoutKind::Dwindle => "dwindle",
+            LayoutKind::Master => "master",
+            LayoutKind::Monocle => "monocle",
+        }
+    }
+
+    /// The next layout in `cycle-layout` order.
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|l| *l == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    /// Adjusts `ratios` so the window at `index` of `count` grows by `delta`
+    /// (shrinks if negative). Returns whether anything changed.
+    pub fn resize(self, ratios: &mut Ratios, index: usize, count: usize, delta: f32) -> bool {
+        if count < 2 {
+            return false;
+        }
+        let (split, sign) = match self {
+            LayoutKind::Monocle => return false,
+            // Window i owns the first part of split i; the last window owns
+            // the second part of the final split.
+            LayoutKind::Dwindle if index < count - 1 => (index, 1.0),
+            LayoutKind::Dwindle => (count - 2, -1.0),
+            LayoutKind::Master if index == 0 => (0, 1.0),
+            LayoutKind::Master => (0, -1.0),
+        };
+        ratios.set(split, ratios.get(split) + sign * delta);
+        true
+    }
+}
+
+impl std::str::FromStr for LayoutKind {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL.into_iter().find(|l| l.name() == s).ok_or(())
+    }
+}
+
+impl std::fmt::Display for LayoutKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -128,6 +184,51 @@ pub fn dwindle(count: usize, area: Rect, gaps: Gaps, ratios: &Ratios) -> Vec<Rec
         }
     }
     out
+}
+
+/// Splits `r` into `count` equal rows with `gap` between them; the last row
+/// absorbs the rounding remainder.
+fn rows(count: usize, r: Rect, gap: i32) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let n = count as i32;
+    let usable = (r.h - gap * (n - 1)).max(0);
+    let base = usable / n;
+    (0..n)
+        .map(|i| {
+            let h = if i == n - 1 {
+                usable - base * (n - 1)
+            } else {
+                base
+            };
+            Rect::new(r.x, r.y + (base + gap) * i, r.w, h)
+        })
+        .collect()
+}
+
+pub fn master(count: usize, area: Rect, gaps: Gaps, ratios: &Ratios) -> Vec<Rect> {
+    let gaps = effective_gaps(count, gaps);
+    let area = area.inset(gaps.outer);
+    match count {
+        0 => Vec::new(),
+        1 => vec![area],
+        _ => {
+            let usable = (area.w - gaps.inner).max(0);
+            let mw = (usable as f32 * ratios.get(0)).round() as i32;
+            let main = Rect::new(area.x, area.y, mw, area.h);
+            let stack = Rect::new(area.x + mw + gaps.inner, area.y, usable - mw, area.h);
+            let mut out = vec![main];
+            out.extend(rows(count - 1, stack, gaps.inner));
+            out
+        }
+    }
+}
+
+pub fn monocle(count: usize, area: Rect, gaps: Gaps) -> Vec<Rect> {
+    // Monocle shows one window at a time, so smart gaps treat it as alone.
+    let gaps = effective_gaps(1, gaps);
+    vec![area.inset(gaps.outer); count]
 }
 
 /// Equal-width columns across `area`, left to right. The last column absorbs
@@ -250,6 +351,78 @@ mod tests {
     fn scaled_gaps() {
         let g = Gaps::default().scaled(1.5);
         assert_eq!((g.inner, g.outer), (12, 12));
+    }
+
+    #[test]
+    fn master_stack() {
+        let rects = master(4, Rect::new(0, 0, 1000, 900), NO_GAPS, &Ratios::default());
+        assert_eq!(
+            rects,
+            vec![
+                Rect::new(0, 0, 500, 900),
+                Rect::new(500, 0, 500, 300),
+                Rect::new(500, 300, 500, 300),
+                Rect::new(500, 600, 500, 300),
+            ]
+        );
+        assert_eq!(master(1, AREA, NO_GAPS, &Ratios::default()), vec![AREA]);
+    }
+
+    #[test]
+    fn master_with_gaps_and_ratio() {
+        let gaps = Gaps {
+            inner: 10,
+            outer: 10,
+            smart: true,
+        };
+        let mut ratios = Ratios::default();
+        ratios.set(0, 0.6);
+        let rects = master(3, Rect::new(0, 0, 1010, 520), gaps, &ratios);
+        assert_eq!(
+            rects,
+            vec![
+                Rect::new(10, 10, 588, 500),
+                Rect::new(608, 10, 392, 245),
+                Rect::new(608, 265, 392, 245),
+            ]
+        );
+    }
+
+    #[test]
+    fn monocle_stacks_everything_full_size() {
+        let gaps = Gaps::default();
+        assert_eq!(monocle(3, AREA, gaps), vec![AREA; 3]);
+        let dumb = Gaps {
+            smart: false,
+            ..gaps
+        };
+        assert_eq!(monocle(2, AREA, dumb), vec![AREA.inset(8); 2]);
+    }
+
+    #[test]
+    fn layout_names_and_cycle() {
+        for l in LayoutKind::ALL {
+            assert_eq!(l.name().parse::<LayoutKind>(), Ok(l));
+        }
+        assert_eq!(LayoutKind::Dwindle.next(), LayoutKind::Master);
+        assert_eq!(LayoutKind::Monocle.next(), LayoutKind::Dwindle);
+        assert!("spiral".parse::<LayoutKind>().is_err());
+    }
+
+    #[test]
+    fn resize_targets_the_right_split() {
+        let mut r = Ratios::default();
+        assert!(LayoutKind::Dwindle.resize(&mut r, 1, 3, 0.1));
+        assert_eq!(r.get(1), 0.6);
+        // The last window grows by shrinking the final split.
+        LayoutKind::Dwindle.resize(&mut r, 2, 3, 0.1);
+        assert_eq!(r.get(1), 0.5);
+
+        let mut r = Ratios::default();
+        LayoutKind::Master.resize(&mut r, 2, 3, 0.1);
+        assert_eq!(r.get(0), 0.4);
+        assert!(!LayoutKind::Monocle.resize(&mut r, 0, 3, 0.1));
+        assert!(!LayoutKind::Dwindle.resize(&mut r, 0, 1, 0.1));
     }
 
     #[test]

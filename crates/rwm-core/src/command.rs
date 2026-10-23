@@ -7,8 +7,12 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::geometry::Direction;
+use crate::layout::LayoutKind;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How much `resize grow`/`resize shrink` changes a ratio by default.
+pub const DEFAULT_RESIZE_STEP: f32 = 0.05;
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// `focus left|right|up|down|next|prev`
     Focus(Target),
@@ -24,6 +28,29 @@ pub enum Command {
     Exec(String),
     /// Recompute and reapply every layout.
     Retile,
+    /// `workspace <name|number>`: switch the focused monitor to a workspace.
+    Workspace(String),
+    /// `move-to-workspace <name|number>`: send the focused window there.
+    MoveToWorkspace(String),
+    /// `focus-monitor <dir>`
+    FocusMonitor(Direction),
+    /// `move-to-monitor <dir>`
+    MoveToMonitor(Direction),
+    /// `layout dwindle|master|monocle`
+    Layout(LayoutKind),
+    /// Switch the focused workspace to the next layout.
+    CycleLayout,
+    /// Forget all resize ratios on the focused workspace.
+    LayoutReset,
+    /// `resize grow|shrink [amount]`: grow (positive) or shrink the focused
+    /// window's share of its split.
+    Resize(f32),
+    /// Float a tiled window or tile a floating one.
+    ToggleFloat,
+    /// Make the focused window cover its whole monitor, or back.
+    ToggleFullscreen,
+    /// Re-read the config file.
+    Reload,
     /// Show every hidden window without quitting.
     Restore,
     /// Restore all windows and exit.
@@ -66,6 +93,52 @@ fn target(cmd: &'static str, arg: &str) -> Result<Target, ParseError> {
     }
 }
 
+fn direction(cmd: &'static str, arg: &str) -> Result<Direction, ParseError> {
+    arg.parse().map_err(|()| ParseError::BadArgument {
+        cmd,
+        expected: "left, right, up or down",
+        got: arg.into(),
+    })
+}
+
+fn name_arg(cmd: &'static str, arg: &str) -> Result<String, ParseError> {
+    if arg.is_empty() || arg.contains(char::is_whitespace) {
+        Err(ParseError::BadArgument {
+            cmd,
+            expected: "a workspace name or number",
+            got: arg.into(),
+        })
+    } else {
+        Ok(arg.into())
+    }
+}
+
+fn resize(rest: &str) -> Result<Command, ParseError> {
+    let bad = || ParseError::BadArgument {
+        cmd: "resize",
+        expected: "grow or shrink, optionally followed by an amount like 0.1",
+        got: rest.into(),
+    };
+    let mut parts = rest.split_whitespace();
+    let sign = match parts.next() {
+        Some("grow") => 1.0,
+        Some("shrink") => -1.0,
+        _ => return Err(bad()),
+    };
+    let amount = match parts.next() {
+        None => DEFAULT_RESIZE_STEP,
+        Some(a) => a
+            .parse::<f32>()
+            .ok()
+            .filter(|a| *a > 0.0 && *a < 1.0)
+            .ok_or_else(bad)?,
+    };
+    if parts.next().is_some() {
+        return Err(bad());
+    }
+    Ok(Command::Resize(sign * amount))
+}
+
 fn no_arg(cmd: &'static str, rest: &str, c: Command) -> Result<Command, ParseError> {
     if rest.is_empty() {
         Ok(c)
@@ -95,6 +168,26 @@ impl FromStr for Command {
             "retile" => no_arg("retile", rest, Command::Retile),
             "restore" => no_arg("restore", rest, Command::Restore),
             "quit" => no_arg("quit", rest, Command::Quit),
+            "workspace" => name_arg("workspace", rest).map(Command::Workspace),
+            "move-to-workspace" => {
+                name_arg("move-to-workspace", rest).map(Command::MoveToWorkspace)
+            }
+            "focus-monitor" => direction("focus-monitor", rest).map(Command::FocusMonitor),
+            "move-to-monitor" => direction("move-to-monitor", rest).map(Command::MoveToMonitor),
+            "layout" if rest == "reset" => Ok(Command::LayoutReset),
+            "layout" => rest
+                .parse()
+                .map(Command::Layout)
+                .map_err(|()| ParseError::BadArgument {
+                    cmd: "layout",
+                    expected: "dwindle, master, monocle or reset",
+                    got: rest.into(),
+                }),
+            "cycle-layout" => no_arg("cycle-layout", rest, Command::CycleLayout),
+            "resize" => resize(rest),
+            "toggle-float" => no_arg("toggle-float", rest, Command::ToggleFloat),
+            "toggle-fullscreen" => no_arg("toggle-fullscreen", rest, Command::ToggleFullscreen),
+            "reload" => no_arg("reload", rest, Command::Reload),
             "exec" if rest.is_empty() => Err(ParseError::BadArgument {
                 cmd: "exec",
                 expected: "a command line",
@@ -126,6 +219,18 @@ impl fmt::Display for Command {
             Command::Terminal => f.write_str("terminal"),
             Command::Exec(c) => write!(f, "exec {c}"),
             Command::Retile => f.write_str("retile"),
+            Command::Workspace(n) => write!(f, "workspace {n}"),
+            Command::MoveToWorkspace(n) => write!(f, "move-to-workspace {n}"),
+            Command::FocusMonitor(d) => write!(f, "focus-monitor {d}"),
+            Command::MoveToMonitor(d) => write!(f, "move-to-monitor {d}"),
+            Command::Layout(l) => write!(f, "layout {l}"),
+            Command::CycleLayout => f.write_str("cycle-layout"),
+            Command::LayoutReset => f.write_str("layout reset"),
+            Command::Resize(d) if *d >= 0.0 => write!(f, "resize grow {d}"),
+            Command::Resize(d) => write!(f, "resize shrink {}", -d),
+            Command::ToggleFloat => f.write_str("toggle-float"),
+            Command::ToggleFullscreen => f.write_str("toggle-fullscreen"),
+            Command::Reload => f.write_str("reload"),
             Command::Restore => f.write_str("restore"),
             Command::Quit => f.write_str("quit"),
         }
@@ -154,6 +259,20 @@ mod tests {
             "restore",
             "quit",
             "exec wezterm-gui.exe start --cwd ~",
+            "workspace 3",
+            "workspace web",
+            "move-to-workspace 9",
+            "focus-monitor left",
+            "move-to-monitor right",
+            "layout master",
+            "layout monocle",
+            "layout reset",
+            "cycle-layout",
+            "resize grow 0.05",
+            "resize shrink 0.1",
+            "toggle-float",
+            "toggle-fullscreen",
+            "reload",
         ] {
             assert_eq!(parse(s).to_string(), s);
         }

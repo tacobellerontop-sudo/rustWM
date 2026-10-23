@@ -1,0 +1,96 @@
+# rustWM configuration
+#
+# Saved changes are picked up automatically. If the file has an error, rustWM
+# keeps running with the previous config and logs where the problem is.
+# Every binding maps a key chord to a command; `rwm <command>` runs the same
+# commands from a terminal or script.
+
+[general]
+# Layout for new workspaces: "dwindle", "master" or "monocle".
+default_layout = "dwindle"
+# Where new windows go: "after-focused", "end" or "start".
+new_window = "after-focused"
+# Workspace names (1 to 9), created on every monitor.
+workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+# Command launched by the "terminal" command (Win+Enter). Any exe plus args,
+# e.g. "wezterm-gui.exe", "alacritty.exe" or "pwsh.exe". When unset, rustWM
+# tries wt.exe, then cmd.exe.
+# terminal = "wt.exe -w new"
+
+[gaps]
+inner = 8      # between windows, in pixels at 100% scale
+outer = 8      # between windows and the screen edge
+smart = true   # no gaps when a workspace has a single window
+
+# Bindings are merged over the built-in defaults shown here. Set a chord to
+# "none" to unbind it. Modifiers: win, ctrl, alt, shift.
+# Note: Win+L always locks Windows unless DisableLockWorkstation is set.
+[bindings]
+"win+h" = "focus left"
+"win+j" = "focus down"
+"win+k" = "focus up"
+"win+l" = "focus right"
+"win+left" = "focus left"
+"win+down" = "focus down"
+"win+up" = "focus up"
+"win+right" = "focus right"
+"win+shift+h" = "move left"
+"win+shift+j" = "move down"
+"win+shift+k" = "move up"
+"win+shift+l" = "move right"
+"win+shift+left" = "move left"
+"win+shift+down" = "move down"
+"win+shift+up" = "move up"
+"win+shift+right" = "move right"
+"win+n" = "focus next"
+"win+p" = "focus prev"
+"win+enter" = "terminal"
+"win+shift+enter" = "promote"
+"win+shift+q" = "close"
+"win+space" = "cycle-layout"
+"win+f" = "toggle-float"
+"win+shift+f" = "toggle-fullscreen"
+"win+equal" = "resize grow"
+"win+minus" = "resize shrink"
+"win+shift+r" = "reload"
+"win+ctrl+r" = "retile"
+"win+ctrl+shift+q" = "quit"
+"win+ctrl+left" = "focus-monitor left"
+"win+ctrl+right" = "focus-monitor right"
+"win+ctrl+shift+left" = "move-to-monitor left"
+"win+ctrl+shift+right" = "move-to-monitor right"
+"win+1" = "workspace 1"
+"win+2" = "workspace 2"
+"win+3" = "workspace 3"
+"win+4" = "workspace 4"
+"win+5" = "workspace 5"
+"win+6" = "workspace 6"
+"win+7" = "workspace 7"
+"win+8" = "workspace 8"
+"win+9" = "workspace 9"
+"win+shift+1" = "move-to-workspace 1"
+"win+shift+2" = "move-to-workspace 2"
+"win+shift+3" = "move-to-workspace 3"
+"win+shift+4" = "move-to-workspace 4"
+"win+shift+5" = "move-to-workspace 5"
+"win+shift+6" = "move-to-workspace 6"
+"win+shift+7" = "move-to-workspace 7"
+"win+shift+8" = "move-to-workspace 8"
+"win+shift+9" = "move-to-workspace 9"
+# "win+t" = "exec wezterm-gui.exe start --cwd ~"
+
+# Rules match windows by exe, class and/or title. exe and class must match the
+# whole value (case-insensitive regex); title is a regex searched anywhere.
+# Actions: "float", "ignore", "workspace <name>".
+
+[[rules]]
+match = { exe = "CalculatorApp.exe" }
+actions = ["float"]
+
+[[rules]]
+match = { title = "^Picture-in-Picture$" }
+actions = ["float"]
+
+# [[rules]]
+# match = { exe = "Spotify.exe" }
+# actions = ["workspace 9"]

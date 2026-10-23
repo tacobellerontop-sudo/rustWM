@@ -8,11 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rwm-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-rwm-core.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
