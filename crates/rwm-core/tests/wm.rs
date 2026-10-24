@@ -59,14 +59,17 @@ fn start_skips_unmanageable_and_minimized() {
 }
 
 #[test]
-fn new_window_goes_after_focused_and_reflows() {
+fn new_window_splits_the_focused_one() {
+    // Like Hyprland: the new window takes half of the focused window (1) and
+    // window 2 does not move.
     let mut wm = wm_with(2);
     let h = wm.platform_mut().add_window(9, "new.exe", "new");
     wm.handle(Event::WindowShown(h));
     assert_eq!(order(&wm), vec![1, 9, 2]);
     assert_eq!(wm.focused(), Some(h));
-    assert_eq!(rect(&wm, 9), Rect::new(960, 0, 960, 520));
-    assert_eq!(rect(&wm, 2), Rect::new(960, 520, 960, 520));
+    assert_eq!(rect(&wm, 1), Rect::new(0, 0, 960, 520));
+    assert_eq!(rect(&wm, 9), Rect::new(0, 520, 960, 520));
+    assert_eq!(rect(&wm, 2), Rect::new(960, 0, 960, 1040));
 }
 
 #[test]

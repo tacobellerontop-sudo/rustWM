@@ -141,6 +141,9 @@ pub struct Wm<P: Platform> {
     moving: Option<WindowHandle>,
     /// The border as last drawn.
     border: Option<Border>,
+    /// We just focused the desktop; its focus event must not move the
+    /// focused monitor to wherever the mouse is.
+    desktop_focus_pending: bool,
 }
 
 impl<P: Platform> Wm<P> {
@@ -166,6 +169,7 @@ impl<P: Platform> Wm<P> {
             verify_pending: false,
             moving: None,
             border: None,
+            desktop_focus_pending: false,
         }
     }
 
@@ -263,6 +267,8 @@ impl<P: Platform> Wm<P> {
             Event::WindowFocused(h) => {
                 if self.locate(h).is_some() {
                     self.set_focus_state(h);
+                } else if std::mem::take(&mut self.desktop_focus_pending) {
+                    // We focused the desktop ourselves; the monitor stays.
                 } else {
                     // The desktop, the taskbar or an unmanaged window: the
                     // user is working on the monitor under the mouse.
@@ -345,7 +351,11 @@ impl<P: Platform> Wm<P> {
                 let ws = self.current_ws_mut();
                 ws.layout = ws.layout.next();
             }
-            Command::LayoutReset => self.current_ws_mut().ratios.reset(),
+            Command::LayoutReset => {
+                let ws = self.current_ws_mut();
+                ws.ratios.reset();
+                ws.tree.reset();
+            }
             Command::Resize(delta) => self.resize(delta),
             Command::ToggleFloat => self.toggle_float(),
             Command::ToggleFullscreen => {
@@ -620,7 +630,7 @@ impl<P: Platform> Wm<P> {
             info!(handle = ?h, exe = %w.exe, title = %w.title, slot = ?self.applied.get(&h), actual = ?w.rect,
                 "window refused its tile size, floating it");
             let ws = self.ws_mut(loc);
-            ws.tiled.retain(|x| *x != h);
+            ws.untile(h);
             ws.floating.push(h);
             self.applied.remove(&h);
             // Keep its own size, centred on its monitor.
@@ -741,6 +751,10 @@ impl<P: Platform> Wm<P> {
             return false;
         };
         let (layout, count) = (ws.layout, ws.tiled.len());
+        if layout == LayoutKind::Dwindle {
+            let tiled = ws.tiled.clone();
+            return ws.tree.fit(h, &tiled, area, gaps, rect);
+        }
         layout.fit(&mut ws.ratios, index, count, area, gaps, rect)
     }
 
@@ -1002,16 +1016,24 @@ impl<P: Platform> Wm<P> {
             return;
         }
         let target = self.monitors[self.focused_monitor].active;
+        let mut to_hide = Vec::new();
         for mi in 0..self.monitors.len() {
-            self.set_active(mi, target);
+            to_hide.extend(self.set_active(mi, target));
+        }
+        for h in to_hide {
+            self.hide(h);
         }
     }
 
-    /// Shows workspace `target` on monitor `mi` and hides the one it replaces.
-    fn set_active(&mut self, mi: usize, target: usize) {
+    /// Shows workspace `target` on monitor `mi` and returns the windows of
+    /// the one it replaces. The caller hides them after moving focus: hiding
+    /// the foreground window first makes Windows hand focus to some other
+    /// window, often one on another monitor.
+    #[must_use]
+    fn set_active(&mut self, mi: usize, target: usize) -> Vec<WindowHandle> {
         let mon = &self.monitors[mi];
         if target == mon.active || target >= mon.workspaces.len() {
-            return;
+            return Vec::new();
         }
         let to_show: Vec<_> = mon.workspaces[target].windows().collect();
         let to_hide: Vec<_> = mon.workspace().windows().collect();
@@ -1021,8 +1043,21 @@ impl<P: Platform> Wm<P> {
         for h in to_show {
             self.show(h);
         }
-        for h in to_hide {
-            self.hide(h);
+        to_hide
+    }
+
+    /// Focuses `h`, or the desktop when there is nothing to focus, so that
+    /// focus stays on this monitor instead of going wherever Windows picks.
+    fn focus_or_desktop(&mut self, h: Option<WindowHandle>) {
+        match h {
+            Some(h) => self.focus_window(h),
+            None => {
+                self.desktop_focus_pending = true;
+                if let Err(e) = self.platform.focus_desktop() {
+                    self.desktop_focus_pending = false;
+                    debug!(error = %e, "could not focus the desktop");
+                }
+            }
         }
     }
 
@@ -1154,9 +1189,19 @@ impl<P: Platform> Wm<P> {
             return;
         };
         let ws = self.current_ws_mut();
-        let other = match ws.index_of(h) {
-            Some(0) => ws.tiled.get(1).copied(),
-            Some(_) => ws.tiled.first().copied(),
+        if ws.index_of(h).is_none() {
+            return;
+        }
+        // In dwindle the first slot is the tree's first (biggest) window,
+        // which needn't be first in the list.
+        let order = if ws.layout == LayoutKind::Dwindle {
+            ws.tree.leaves()
+        } else {
+            ws.tiled.clone()
+        };
+        let other = match order.iter().position(|x| *x == h) {
+            Some(0) => order.get(1).copied(),
+            Some(_) => order.first().copied(),
             None => None,
         };
         if let Some(o) = other {
@@ -1171,7 +1216,11 @@ impl<P: Platform> Wm<P> {
         let ws = self.current_ws_mut();
         if let Some(i) = ws.index_of(h) {
             let (layout, count) = (ws.layout, ws.tiled.len());
-            layout.resize(&mut ws.ratios, i, count, delta);
+            if layout == LayoutKind::Dwindle {
+                ws.tree.resize(ws.tiled[i], delta);
+            } else {
+                layout.resize(&mut ws.ratios, i, count, delta);
+            }
         }
     }
 
@@ -1188,7 +1237,7 @@ impl<P: Platform> Wm<P> {
             // The user wants it tiled: don't float it again if it looks fixed-size.
             self.force_tiled.insert(h);
         } else {
-            ws.tiled.retain(|x| *x != h);
+            ws.untile(h);
             ws.floating.push(h);
             self.force_tiled.remove(&h);
             self.applied.remove(&h);
@@ -1216,23 +1265,21 @@ impl<P: Platform> Wm<P> {
         if target == self.monitors[mi].active {
             return;
         }
-        match self.settings.workspace_mode {
+        let to_hide = match self.settings.workspace_mode {
             WorkspaceMode::PerMonitor => self.set_active(mi, target),
-            WorkspaceMode::Global => {
-                for m in 0..self.monitors.len() {
-                    self.set_active(m, target);
-                }
-            }
-        }
+            WorkspaceMode::Global => (0..self.monitors.len())
+                .flat_map(|m| self.set_active(m, target))
+                .collect(),
+        };
         let focus = self.monitors[mi].workspace().focused.or_else(|| {
             // Global mode: if this monitor's half is empty, focus another's.
             (self.settings.workspace_mode == WorkspaceMode::Global)
                 .then(|| self.monitors.iter().find_map(|m| m.workspace().focused))
                 .flatten()
         });
-        match focus {
-            Some(h) => self.focus_window(h),
-            None => debug!(workspace = name, "switched to empty workspace"),
+        self.focus_or_desktop(focus);
+        for h in to_hide {
+            self.hide(h);
         }
     }
 
@@ -1260,10 +1307,9 @@ impl<P: Platform> Wm<P> {
             self.show(h);
             self.focus_window(h);
         } else {
+            let next = self.ws(from).focused;
+            self.focus_or_desktop(next);
             self.hide(h);
-            if let Some(next) = self.ws(from).focused {
-                self.focus_window(next);
-            }
         }
     }
 
@@ -1271,15 +1317,17 @@ impl<P: Platform> Wm<P> {
         let idx = self.special(name);
         let shown = self.special_shown;
         if let Some((current, _)) = shown {
-            for h in self.specials[current].windows().collect::<Vec<_>>() {
-                self.hide(h);
-            }
+            let to_hide: Vec<_> = self.specials[current].windows().collect();
             self.special_shown = None;
             self.special_focused = false;
             if current == idx {
-                if let Some(h) = self.monitors[self.focused_monitor].workspace().focused {
-                    self.focus_window(h);
-                }
+                let back = self.monitors[self.focused_monitor].workspace().focused;
+                self.focus_or_desktop(back);
+            }
+            for h in to_hide {
+                self.hide(h);
+            }
+            if current == idx {
                 return;
             }
         }
@@ -1392,10 +1440,12 @@ fn arrange(ws: &Workspace, area: Rect, full: Rect, gaps: Gaps) -> Vec<(WindowHan
         .copied()
         .filter(|h| Some(*h) != fullscreen)
         .collect();
-    let rects = ws.layout.arrange(tiled.len(), area, gaps, &ws.ratios);
-    tiled
-        .into_iter()
-        .zip(rects)
-        .chain(fullscreen.map(|h| (h, full)))
-        .collect()
+    let mut out = if ws.layout == LayoutKind::Dwindle {
+        ws.tree.arrange(&tiled, area, gaps)
+    } else {
+        let rects = ws.layout.arrange(tiled.len(), area, gaps, &ws.ratios);
+        tiled.into_iter().zip(rects).collect()
+    };
+    out.extend(fullscreen.map(|h| (h, full)));
+    out
 }

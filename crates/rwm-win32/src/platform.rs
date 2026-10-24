@@ -10,8 +10,8 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, IsIconic, IsZoomed, PostMessageW, SW_HIDE, SW_RESTORE,
-    SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+    GetCursorPos, GetForegroundWindow, GetShellWindow, IsIconic, IsZoomed, PostMessageW, SW_HIDE,
+    SW_RESTORE, SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
     SetForegroundWindow, SetWindowPos, ShowWindowAsync, WM_CLOSE,
 };
 
@@ -163,6 +163,28 @@ impl Platform for Win32Platform {
                 return Err(PlatformError::Os(format!(
                     "SetForegroundWindow refused for {handle:?}"
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    fn focus_desktop(&mut self) -> Result<()> {
+        // SAFETY: GetShellWindow takes no arguments; the input trick is the
+        // same as in `focus`.
+        unsafe {
+            let desktop = GetShellWindow();
+            if desktop.is_invalid() {
+                return Err(PlatformError::Os("no shell window".into()));
+            }
+            let input = INPUT {
+                r#type: INPUT_MOUSE,
+                ..Default::default()
+            };
+            SendInput(&[input], size_of::<INPUT>() as i32);
+            if !SetForegroundWindow(desktop).as_bool() {
+                return Err(PlatformError::Os(
+                    "SetForegroundWindow refused for the desktop".into(),
+                ));
             }
         }
         Ok(())

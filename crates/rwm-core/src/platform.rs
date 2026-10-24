@@ -69,6 +69,9 @@ pub trait Platform {
 
     fn focus(&mut self, handle: WindowHandle) -> Result<()>;
 
+    /// Gives focus to the desktop, e.g. after switching to an empty workspace.
+    fn focus_desktop(&mut self) -> Result<()>;
+
     /// Politely asks a window to close (like clicking its close button).
     fn close(&mut self, handle: WindowHandle) -> Result<()>;
 

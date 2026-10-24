@@ -17,10 +17,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::events::send;
 
 /// How often the cursor is checked.
-const POLL: Duration = Duration::from_millis(40);
-/// How long the cursor must rest on a window before it gets focus, so
-/// sweeping across windows doesn't flicker focus along the way.
-const SETTLE: Duration = Duration::from_millis(120);
+const POLL: Duration = Duration::from_millis(10);
+/// How long the cursor must rest on a window before it gets focus. Just long
+/// enough that flicking the mouse across a window doesn't focus it.
+const SETTLE: Duration = Duration::from_millis(25);
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static START: Once = Once::new();

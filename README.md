@@ -52,7 +52,8 @@ broken file is reported in the log and the previous config keeps running.
 ```toml
 [general]
 default_layout = "dwindle"       # dwindle | master | monocle
-new_window = "after-focused"     # after-focused | end | start
+new_window = "after-focused"     # after-focused: split the focused window in half (Hyprland)
+                                 # end | start: split the last / first window
 workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 workspace_mode = "per-monitor"   # per-monitor | global (Win+Alt+W toggles)
 focus_follows_mouse = false      # focus windows by hovering, no click needed
