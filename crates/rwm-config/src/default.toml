@@ -28,6 +28,11 @@ mouse_follows_focus = false
 workspace_back_and_forth = false
 # Opacity of windows that don't have focus, 0.1 to 1.0 (1.0 = off).
 inactive_opacity = 1.0
+# How windows of other workspaces are kept out of sight. "offscreen" moves
+# them past the edge of your monitors so they keep their taskbar buttons
+# (clicking one switches to its workspace); "hide" hides them, and they leave
+# the taskbar until you switch back.
+hide_method = "offscreen"
 # Command launched by the "terminal" command (Win+Enter). Any exe plus args,
 # e.g. "wezterm-gui.exe", "alacritty.exe" or "pwsh.exe". When unset, rustWM
 # tries wt.exe, then cmd.exe.
@@ -45,6 +50,11 @@ smart = true   # no gaps when a workspace has a single window
 # layout = "monocle"
 # gaps_inner = 0
 # gaps_outer = 0
+
+# Windows slide to their new place instead of jumping.
+[animation]
+enabled = true
+duration_ms = 200    # 0 to 1000
 
 # A coloured frame drawn just inside the focused window's edge.
 [border]
