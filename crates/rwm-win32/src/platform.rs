@@ -1,7 +1,7 @@
-use std::collections::BTreeSet;
 use std::os::windows::process::CommandExt;
+use std::time::Duration;
 
-use rwm_core::platform::Result;
+use rwm_core::platform::{HideMethod, PlatformOptions, Result};
 use rwm_core::{MonitorInfo, Platform, PlatformError, Rect, WindowHandle, WindowInfo};
 use tracing::{info, warn};
 use windows::Win32::Foundation::POINT;
@@ -10,12 +10,15 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, GetShellWindow, IsIconic, IsZoomed, PostMessageW, SW_HIDE,
-    SW_RESTORE, SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, ShowWindowAsync, WM_CLOSE,
+    GetCursorPos, GetForegroundWindow, GetShellWindow, GetSystemMetrics, IsIconic, IsWindowVisible,
+    IsZoomed, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOWNA, SetCursorPos, SetForegroundWindow,
+    ShowWindowAsync, WM_CLOSE,
 };
 
-use crate::{hidden, monitor, window};
+use crate::hidden::Hidden;
+use crate::monitor::rect_from;
+use crate::{hidden, monitor, mover, window};
 
 /// Gives a console app its own window; GUI apps ignore the flag.
 const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
@@ -38,8 +41,34 @@ pub fn enable_dpi_awareness() {
 /// the window manager.
 #[derive(Debug, Default)]
 pub struct Win32Platform {
-    /// Windows we hid, mirrored to disk so they survive a crash.
-    hidden: BTreeSet<WindowHandle>,
+    /// Windows we took off the screen, mirrored to disk so they survive a
+    /// crash.
+    hidden: Hidden,
+    options: PlatformOptions,
+}
+
+/// The bounding box of every monitor.
+fn virtual_screen() -> Rect {
+    // SAFETY: GetSystemMetrics has no preconditions.
+    unsafe {
+        Rect::new(
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    }
+}
+
+/// Where a window of size `r` goes to be out of sight: just past the right
+/// edge of the rightmost monitor, so no part of it shows anywhere.
+fn offscreen(r: Rect) -> Rect {
+    let screen = virtual_screen();
+    Rect::new(screen.right() + 100, screen.y, r.w, r.h)
+}
+
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
 }
 
 impl Win32Platform {
@@ -146,6 +175,8 @@ impl Platform for Win32Platform {
 
     fn set_rects(&mut self, moves: &[(WindowHandle, Rect)]) -> Result<()> {
         let mut first_err = None;
+        let screen = virtual_screen();
+        let duration = Duration::from_millis(self.options.animation_ms.into());
         for &(h, frame) in moves {
             let hwnd = match self.checked(h) {
                 Ok(hwnd) => hwnd,
@@ -154,49 +185,95 @@ impl Platform for Win32Platform {
                     continue;
                 }
             };
-            // SAFETY: `hwnd` was just validated; both calls are asynchronous
-            // for windows owned by other threads, so a hung app cannot block us.
-            unsafe {
-                if IsZoomed(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            // SAFETY: `hwnd` was just validated; the calls are asynchronous or
+            // only read state, so a hung app cannot block us.
+            let (restored, visible) = unsafe {
+                let restore = IsZoomed(hwnd).as_bool() || IsIconic(hwnd).as_bool();
+                if restore {
                     let _ = ShowWindowAsync(hwnd, SW_RESTORE);
                 }
-                let r = window::outer_rect_for(hwnd, frame);
-                if let Err(e) = SetWindowPos(
-                    hwnd,
-                    None,
-                    r.x,
-                    r.y,
-                    r.w,
-                    r.h,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
-                ) {
-                    // Access denied almost always means an elevated window.
-                    warn!(handle = ?h, error = %e, "SetWindowPos failed");
-                    first_err.get_or_insert(PlatformError::AccessDenied(h));
+                (restore, IsWindowVisible(hwnd).as_bool())
+            };
+            let to = window::outer_rect_for(hwnd, frame);
+            let from = window::window_rect(hwnd).map(rect_from);
+            // Slide only windows already on screen in their normal state:
+            // not ones coming back from off-screen, hidden or minimized.
+            match from {
+                Some(from)
+                    if visible
+                        && !restored
+                        && !self.hidden.contains_key(&h)
+                        && overlaps(from, screen) =>
+                {
+                    let insets = (
+                        frame.x - to.x,
+                        frame.y - to.y,
+                        to.right() - frame.right(),
+                        to.bottom() - frame.bottom(),
+                    );
+                    mover::slide(h, from, to, duration, insets)
                 }
+                _ => mover::place_now(h, to),
             }
         }
         first_err.map_or(Ok(()), Err)
     }
 
     fn show(&mut self, handle: WindowHandle) -> Result<()> {
-        if self.hidden.remove(&handle) {
+        let was = self.hidden.remove(&handle);
+        if was.is_some() {
             hidden::save(&self.hidden);
         }
         let hwnd = self.checked(handle)?;
-        // SAFETY: validated handle; asynchronous call.
-        let _ = unsafe { ShowWindowAsync(hwnd, SW_SHOWNA) };
+        match was {
+            // Back from off-screen to where it was.
+            Some(Some(r)) => mover::place_now(handle, r),
+            // SAFETY: validated handle; asynchronous call.
+            _ => {
+                let _ = unsafe { ShowWindowAsync(hwnd, SW_SHOWNA) };
+            }
+        }
         Ok(())
     }
 
     fn hide(&mut self, handle: WindowHandle) -> Result<()> {
         let hwnd = self.checked(handle)?;
-        // Record before hiding, so a crash in between still restores it.
-        self.hidden.insert(handle);
-        hidden::save(&self.hidden);
-        // SAFETY: validated handle; asynchronous call.
-        let _ = unsafe { ShowWindowAsync(hwnd, SW_HIDE) };
+        match self.options.hide_method {
+            HideMethod::Offscreen => {
+                // Hiding it again (after a display change) keeps the rect it
+                // had on screen.
+                let back = match self.hidden.get(&handle) {
+                    Some(Some(r)) => *r,
+                    _ => window::window_rect(hwnd)
+                        .map(rect_from)
+                        .ok_or(PlatformError::WindowGone(handle))?,
+                };
+                // Record before moving, so a crash in between still restores it.
+                self.hidden.insert(handle, Some(back));
+                hidden::save(&self.hidden);
+                mover::place_now(handle, offscreen(back));
+            }
+            HideMethod::Hide => {
+                self.hidden.insert(handle, None);
+                hidden::save(&self.hidden);
+                // SAFETY: validated handle; asynchronous call.
+                let _ = unsafe { ShowWindowAsync(hwnd, SW_HIDE) };
+            }
+        }
         Ok(())
+    }
+
+    fn configure(&mut self, options: PlatformOptions) {
+        let changed = options.hide_method != self.options.hide_method;
+        self.options = options;
+        if changed {
+            // Move windows hidden the old way over to the new way.
+            let handles: Vec<_> = self.hidden.keys().copied().collect();
+            for h in handles {
+                let _ = self.show(h);
+                let _ = self.hide(h);
+            }
+        }
     }
 
     fn focus(&mut self, handle: WindowHandle) -> Result<()> {
@@ -260,6 +337,18 @@ impl Platform for Win32Platform {
 
     fn set_border(&mut self, border: Option<rwm_core::Border>) {
         crate::border::update(border);
+    }
+
+    fn set_cursor_pos(&mut self, x: i32, y: i32) -> Result<()> {
+        // SAFETY: plain coordinates; the process is per-monitor DPI aware, so
+        // they are physical pixels like everything else.
+        unsafe { SetCursorPos(x, y) }.map_err(|e| PlatformError::Os(e.to_string()))
+    }
+
+    fn set_opacity(&mut self, handle: WindowHandle, alpha: u8) -> Result<()> {
+        self.checked(handle)?;
+        crate::opacity::set(handle, alpha);
+        Ok(())
     }
 
     fn spawn(&mut self, command_line: &str) -> Result<()> {

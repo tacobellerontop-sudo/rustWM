@@ -16,6 +16,26 @@ pub struct MonitorInfo {
     pub primary: bool,
 }
 
+/// How windows on inactive workspaces are taken off the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HideMethod {
+    /// Move them outside every monitor. They keep their taskbar buttons,
+    /// and clicking one switches to its workspace.
+    #[default]
+    Offscreen,
+    /// Hide them (`SW_HIDE`); they leave the taskbar until shown again.
+    Hide,
+}
+
+/// Behaviour the platform needs to know about, from the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlatformOptions {
+    pub hide_method: HideMethod,
+    /// How long window moves are animated; 0 moves them at once.
+    pub animation_ms: u32,
+}
+
 /// The coloured frame drawn around the focused window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Border {
@@ -89,4 +109,17 @@ pub trait Platform {
 
     /// Draws the focus border, or hides it with `None`.
     fn set_border(&mut self, border: Option<Border>);
+
+    /// Applies config the platform cares about. Called at start and on reload.
+    fn configure(&mut self, _options: PlatformOptions) {}
+
+    /// Moves the mouse cursor (physical pixels), for `mouse_follows_focus`.
+    fn set_cursor_pos(&mut self, _x: i32, _y: i32) -> Result<()> {
+        Ok(())
+    }
+
+    /// Makes a window translucent: 255 is opaque (and undoes any change).
+    fn set_opacity(&mut self, _handle: WindowHandle, _alpha: u8) -> Result<()> {
+        Ok(())
+    }
 }

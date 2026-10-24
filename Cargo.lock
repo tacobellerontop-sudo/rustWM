@@ -424,7 +424,6 @@ dependencies = [
 name = "rwm-win32"
 version = "0.1.0"
 dependencies = [
- "rwm-config",
  "rwm-core",
  "tracing",
  "windows",

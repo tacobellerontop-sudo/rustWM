@@ -13,8 +13,9 @@ pub fn run() -> anyhow::Result<()> {
     loop {
         clear_screen();
         let running = Client::connect().is_ok();
-        print_header(running, &config);
-        let items = items(running);
+        let kerys = super::kerys_running();
+        print_header(running, kerys, &config);
+        let items = items(running, kerys);
         for (i, item) in items.iter().enumerate() {
             println!("  {}  {}", i + 1, item.label());
         }
@@ -64,11 +65,13 @@ pub fn run() -> anyhow::Result<()> {
 #[derive(Debug, Clone, Copy)]
 enum Item {
     Start,
+    StartKerys,
     Stop,
     Restart,
     Settings,
     EditConfig,
     CheckConfig,
+    EditKeys,
     Keybindings,
     Autostart(bool),
     AddToPath,
@@ -76,16 +79,20 @@ enum Item {
     OpenLog,
 }
 
-fn items(running: bool) -> Vec<Item> {
+fn items(running: bool, kerys: bool) -> Vec<Item> {
     let mut items = if running {
         vec![Item::Stop, Item::Restart]
     } else {
         vec![Item::Start]
     };
+    if running && !kerys {
+        items.insert(0, Item::StartKerys);
+    }
     items.extend([
         Item::Settings,
         Item::EditConfig,
         Item::CheckConfig,
+        Item::EditKeys,
         Item::Keybindings,
     ]);
     items.push(Item::Autostart(!autostart_on().unwrap_or(false)));
@@ -99,12 +106,14 @@ fn items(running: bool) -> Vec<Item> {
 impl Item {
     fn label(self) -> &'static str {
         match self {
-            Item::Start => "Start rustWM",
-            Item::Stop => "Stop rustWM (all windows come back)",
-            Item::Restart => "Restart rustWM",
+            Item::Start => "Start rustWM + kerys",
+            Item::StartKerys => "Start kerys (hotkeys are off)",
+            Item::Stop => "Stop rustWM + kerys (all windows come back)",
+            Item::Restart => "Restart rustWM + kerys",
             Item::Settings => "Settings (focus follows mouse, border, gaps, ...)",
             Item::EditConfig => "Edit config file (changes apply when you save)",
             Item::CheckConfig => "Check config for errors",
+            Item::EditKeys => "Edit keybindings (settings window)",
             Item::Keybindings => "Show keybindings",
             Item::Autostart(true) => "Start rustWM when I log in",
             Item::Autostart(false) => "Don't start rustWM when I log in",
@@ -119,6 +128,7 @@ impl Item {
             // Handled by the menu loop, which owns stdin.
             Item::Settings => Ok(()),
             Item::Start => super::start(None),
+            Item::StartKerys => super::start_kerys(),
             Item::Stop => super::stop(),
             Item::Restart => {
                 super::stop()?;
@@ -137,9 +147,31 @@ impl Item {
                 println!("  {}: OK", config.display());
                 Ok(())
             }
-            Item::Keybindings => {
-                show_bindings(config);
+            Item::EditKeys => {
+                let kerys = super::kerys_path().ok_or_else(|| {
+                    anyhow::anyhow!("kerys.exe is missing; put it next to rwm.exe")
+                })?;
+                std::process::Command::new(kerys)
+                    .arg("gui")
+                    .spawn()
+                    .map_err(|e| {
+                        anyhow::anyhow!("cannot run kerys ({e}); keep kerys.exe next to rwm.exe")
+                    })?;
+                println!("  Opened the kerys settings window");
                 Ok(())
+            }
+            Item::Keybindings => {
+                let kerys = super::kerys_path().ok_or_else(|| {
+                    anyhow::anyhow!("kerys.exe is missing; put it next to rwm.exe")
+                })?;
+                let status = std::process::Command::new(kerys).arg("bindings").status();
+                match status {
+                    Ok(s) if s.success() => Ok(()),
+                    Ok(s) => anyhow::bail!("kerys bindings failed ({s})"),
+                    Err(e) => {
+                        anyhow::bail!("cannot run kerys ({e}); keep kerys.exe next to rwm.exe")
+                    }
+                }
             }
             Item::Autostart(on) => super::autostart(if on { "on" } else { "off" }),
             Item::AddToPath => add_to_path(),
@@ -155,7 +187,7 @@ impl Item {
     }
 }
 
-fn print_header(running: bool, config: &Path) {
+fn print_header(running: bool, kerys: bool, config: &Path) {
     println!();
     println!("  rustWM {}", env!("CARGO_PKG_VERSION"));
     println!("  ----------------------------------------------");
@@ -168,6 +200,16 @@ fn print_header(running: bool, config: &Path) {
         "not running".into()
     };
     println!("  Status:     {status}");
+    let hotkeys = if kerys {
+        "on (kerys running)"
+    } else if super::kerys_path().is_none() {
+        "off: kerys.exe is missing, put it next to rwm.exe"
+    } else if running {
+        "off: kerys is not running"
+    } else {
+        "off (kerys starts with rustWM)"
+    };
+    println!("  Hotkeys:    {hotkeys}");
     println!("  Config:     {}", config.display());
     if let Some(on) = autostart_on() {
         println!("  Autostart:  {}", if on { "on" } else { "off" });
@@ -201,33 +243,6 @@ fn summary() -> Option<String> {
         plural(monitors.len(), "monitor"),
         plural(windows, "window")
     ))
-}
-
-fn show_bindings(config: &Path) {
-    let loaded = match rwm_config::load(config) {
-        Ok(l) => l,
-        Err(e) => {
-            println!("  {e}; showing the built-in defaults");
-            println!();
-            rwm_config::parse("").expect("empty config is valid")
-        }
-    };
-    let width = loaded
-        .bindings
-        .iter()
-        .map(|(c, _)| c.to_string().len())
-        .max()
-        .unwrap_or(0);
-    for (chord, command) in &loaded.bindings {
-        println!("  {:width$}  {command}", chord.to_string());
-    }
-    for (mode, bindings) in &loaded.modes {
-        println!();
-        println!("  In {mode} mode:");
-        for (chord, command) in bindings {
-            println!("  {:width$}  {command}", chord.to_string());
-        }
-    }
 }
 
 #[cfg(windows)]

@@ -15,6 +15,11 @@ pub enum RuleAction {
     Tile,
     /// Open the window on the named workspace of its monitor.
     Workspace(String),
+    /// Open the window on this monitor (1-based, in the order Windows lists
+    /// them, primary first).
+    Monitor(usize),
+    /// Float the window and keep it on screen on every workspace.
+    Pin,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -27,7 +32,9 @@ pub enum RuleError {
         #[source]
         source: regex::Error,
     },
-    #[error("unknown rule action `{0}` (expected float, tile, ignore or workspace <name>)")]
+    #[error(
+        "unknown rule action `{0}` (expected float, tile, ignore, pin, workspace <name> or monitor <n>)"
+    )]
     Action(String),
 }
 
@@ -58,6 +65,14 @@ impl RuleAction {
             None if s == "float" => Ok(Self::Float),
             None if s == "ignore" => Ok(Self::Ignore),
             None if s == "tile" => Ok(Self::Tile),
+            None if s == "pin" => Ok(Self::Pin),
+            Some(("monitor", n)) => n
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n >= 1)
+                .map(Self::Monitor)
+                .ok_or_else(|| RuleError::Action(s.into())),
             Some(("workspace", name)) if !name.trim().is_empty() => {
                 Ok(Self::Workspace(name.trim().into()))
             }
@@ -103,7 +118,10 @@ pub struct Verdict {
     pub ignore: bool,
     pub float: bool,
     pub tile: bool,
+    pub pin: bool,
     pub workspace: Option<String>,
+    /// 0-based monitor index.
+    pub monitor: Option<usize>,
 }
 
 pub fn evaluate(rules: &[Rule], w: &WindowInfo) -> Verdict {
@@ -115,6 +133,11 @@ pub fn evaluate(rules: &[Rule], w: &WindowInfo) -> Verdict {
                 RuleAction::Ignore => v.ignore = true,
                 RuleAction::Tile => v.tile = true,
                 RuleAction::Workspace(name) => v.workspace = Some(name.clone()),
+                RuleAction::Monitor(n) => v.monitor = Some(n - 1),
+                RuleAction::Pin => {
+                    v.pin = true;
+                    v.float = true;
+                }
             }
         }
     }
@@ -183,10 +206,9 @@ mod tests {
         assert_eq!(
             v,
             Verdict {
-                ignore: false,
                 float: true,
-                tile: false,
-                workspace: Some("3".into())
+                workspace: Some("3".into()),
+                ..Verdict::default()
             }
         );
         assert_eq!(evaluate(&rules, &win("x.exe", "", "y")), Verdict::default());
@@ -200,6 +222,13 @@ mod tests {
             RuleAction::Workspace("2".into())
         );
         assert!(RuleAction::parse("workspace").is_err());
+        assert_eq!(
+            RuleAction::parse("monitor 2").unwrap(),
+            RuleAction::Monitor(2)
+        );
+        assert_eq!(RuleAction::parse("pin").unwrap(), RuleAction::Pin);
+        assert!(RuleAction::parse("monitor 0").is_err());
+        assert!(RuleAction::parse("monitor x").is_err());
         assert!(RuleAction::parse("explode").is_err());
         assert!(matches!(
             Rule::new(None, None, None, vec![]),

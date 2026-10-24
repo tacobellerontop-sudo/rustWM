@@ -1,6 +1,6 @@
 [package]
 name = "rwm-config"
-description = "TOML configuration schema and keybinding parser for rustWM"
+description = "TOML configuration schema for rustWM"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

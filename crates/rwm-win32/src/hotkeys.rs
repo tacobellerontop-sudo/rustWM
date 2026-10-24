@@ -1,203 +1,120 @@
-//! Global hotkeys through a low-level keyboard hook.
+//! Starting the hotkey daemon (kerys by default) alongside rustWM.
 //!
-//! `RegisterHotKey` cannot claim most Win+key combinations (Windows reserves
-//! them), so rustWM watches the keyboard with `WH_KEYBOARD_LL` instead. When a
-//! chord matches a binding, the key is swallowed and its command is sent to
-//! the core. A lone Win tap still opens Start: we only suppress Start after a
-//! chord actually fired.
+//! rustWM has no keyboard handling of its own. The daemon watches the keys
+//! and sends commands over the pipe, like `rwm` does. It is started in a job
+//! object that kills it when the job handle closes, so it goes away with
+//! rustWM however rustWM exits, crashes included, and never keeps swallowing
+//! Win+key chords with no window manager behind them.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::io;
+use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use rwm_config::Chord;
-use rwm_core::Event;
-use tracing::warn;
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-    VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
-    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+use tracing::info;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
 };
 
-use crate::events::send;
+/// No console window for the background daemon.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Bindings per mode name; the normal mode is `default`.
-static BINDINGS: RwLock<Option<HashMap<String, HashMap<Chord, String>>>> = RwLock::new(None);
-
-/// The active binding mode.
-static MODE: RwLock<String> = RwLock::new(String::new());
-
-const DEFAULT_MODE: &str = "default";
-
-/// A Win+key chord fired since Win went down, so Start must not open on release.
-static WIN_CHORD_FIRED: AtomicBool = AtomicBool::new(false);
-
-/// Keys whose key-down we swallowed; their key-up is swallowed too.
-static SWALLOWED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-
-/// An unassigned virtual key, injected to stop the Start menu opening.
-const VK_NONE: u16 = 0xE8;
-
-/// Replaces all key bindings: the default mode's and every other mode's.
-/// Safe to call from any thread at any time.
-pub fn set_bindings(
-    default: impl IntoIterator<Item = (Chord, String)>,
-    modes: impl IntoIterator<Item = (String, Vec<(Chord, String)>)>,
-) {
-    let mut map: HashMap<String, HashMap<Chord, String>> = modes
-        .into_iter()
-        .map(|(name, binds)| (name, binds.into_iter().collect()))
-        .collect();
-    map.insert(DEFAULT_MODE.into(), default.into_iter().collect());
-    if let Ok(mut b) = BINDINGS.write() {
-        *b = Some(map);
-    }
+/// The running hotkey daemon. Dropping it stops the daemon.
+pub struct HotkeyDaemon {
+    job: HANDLE,
 }
 
-/// Switches the active binding mode. Unknown modes behave like `default`.
-pub fn set_mode(mode: &str) {
-    if let Ok(mut m) = MODE.write() {
-        mode.clone_into(&mut m);
-    }
+// SAFETY: a job HANDLE may be used and closed from any thread.
+unsafe impl Send for HotkeyDaemon {}
+
+/// A bare program name is looked for next to rustwm.exe first, so the exes
+/// from one zip find each other without being on PATH.
+fn resolve(program: &str) -> PathBuf {
+    let bare = !program.contains(['\\', '/']);
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(program)))
+        .filter(|p| bare && p.is_file());
+    beside.unwrap_or_else(|| Path::new(program).to_path_buf())
 }
 
-fn pressed(vk: VIRTUAL_KEY) -> bool {
-    // SAFETY: no preconditions.
-    unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 }
-}
-
-fn is_modifier(vk: u32) -> bool {
-    [
-        VK_LWIN,
-        VK_RWIN,
-        VK_SHIFT,
-        VK_LSHIFT,
-        VK_RSHIFT,
-        VK_CONTROL,
-        VK_LCONTROL,
-        VK_RCONTROL,
-        VK_MENU,
-        VK_LMENU,
-        VK_RMENU,
-    ]
-    .iter()
-    .any(|m| m.0 as u32 == vk)
-}
-
-fn lookup(chord: &Chord) -> Option<String> {
-    let bindings = BINDINGS.read().ok()?;
-    let bindings = bindings.as_ref()?;
-    let mode = MODE.read().ok()?;
-    bindings
-        .get(mode.as_str())
-        .or_else(|| bindings.get(DEFAULT_MODE))?
-        .get(chord)
-        .cloned()
-}
-
-/// Taps an unassigned key so Windows sees Win+<something> and skips Start.
-fn suppress_start_menu() {
-    let key = |flags| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(VK_NONE),
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    };
-    let inputs = [key(Default::default()), key(KEYEVENTF_KEYUP)];
-    // SAFETY: a valid slice of fully initialised keyboard inputs.
-    unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
-}
-
-/// Decides whether to swallow a key event. Must return quickly: Windows drops
-/// hooks that take longer than `LowLevelHooksTimeout`.
-fn on_key(msg: u32, vk: u32) -> bool {
-    let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-    let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-    if is_modifier(vk) {
-        let win = vk == VK_LWIN.0 as u32 || vk == VK_RWIN.0 as u32;
-        if up && win && WIN_CHORD_FIRED.swap(false, Ordering::Relaxed) {
-            suppress_start_menu();
-        }
-        return false;
-    }
-    if down {
-        let chord = Chord {
-            win: pressed(VK_LWIN) || pressed(VK_RWIN),
-            ctrl: pressed(VK_CONTROL),
-            alt: pressed(VK_MENU),
-            shift: pressed(VK_SHIFT),
-            vk: vk as u16,
-        };
-        if let Some(cmd) = lookup(&chord) {
-            send(Event::Command(cmd));
-            if chord.win {
-                WIN_CHORD_FIRED.store(true, Ordering::Relaxed);
-            }
-            if let Ok(mut s) = SWALLOWED.lock() {
-                if !s.contains(&vk) {
-                    s.push(vk);
-                }
-            }
-            return true;
-        }
-        return false;
-    }
-    if up {
-        if let Ok(mut s) = SWALLOWED.lock() {
-            if let Some(i) = s.iter().position(|k| *k == vk) {
-                s.swap_remove(i);
-                return true;
-            }
-        }
-    }
-    false
-}
-
-unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        // SAFETY: for HC_ACTION, lparam points to a KBDLLHOOKSTRUCT.
-        let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        // Ignore injected input, including our own Start-menu suppression.
-        if !kb.flags.contains(LLKHF_INJECTED) && on_key(wparam.0 as u32, kb.vkCode) {
-            return LRESULT(1);
-        }
-    }
-    // SAFETY: passing the hook arguments on unchanged.
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
-}
-
-/// Installs the hook on the calling thread, which must pump messages.
-pub(crate) fn install() -> Option<HHOOK> {
-    // SAFETY: valid hook procedure and module handle.
-    let hook = unsafe {
-        let instance = GetModuleHandleW(None).ok()?;
-        SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(ll_keyboard_proc),
-            Some(instance.into()),
-            0,
+fn kill_on_close_job() -> io::Result<HANDLE> {
+    // SAFETY: an anonymous job with default security.
+    let job = unsafe { CreateJobObjectW(None, None) }?;
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `limits` is the struct this information class expects, and it
+    // outlives the call.
+    let set = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         )
     };
-    match hook {
-        Ok(h) => Some(h),
-        Err(e) => {
-            warn!(error = %e, "could not install keyboard hook; hotkeys disabled");
-            None
+    if let Err(e) = set {
+        // SAFETY: closing the job we just created.
+        let _ = unsafe { CloseHandle(job) };
+        return Err(e.into());
+    }
+    Ok(job)
+}
+
+impl HotkeyDaemon {
+    /// Starts `command_line` (a program plus arguments) in the background.
+    pub fn start(command_line: &str) -> io::Result<Self> {
+        let (program, args) = rwm_core::cmdline::split_program(command_line)
+            .ok_or_else(|| io::Error::other("empty or malformed command line"))?;
+        let path = resolve(program);
+        let mut cmd = Command::new(&path);
+        if !args.is_empty() {
+            cmd.raw_arg(args);
         }
+        let job = kill_on_close_job()?;
+        let child = cmd
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())));
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                // SAFETY: closing the job we created.
+                let _ = unsafe { CloseHandle(job) };
+                return Err(e);
+            }
+        };
+        // SAFETY: both handles are valid; the child's stays open while
+        // `child` lives.
+        let assigned = unsafe { AssignProcessToJobObject(job, HANDLE(child.as_raw_handle())) };
+        if let Err(e) = assigned {
+            tracing::warn!(error = %e, "hotkey daemon will not stop with rustWM");
+        }
+        info!(program = %path.display(), pid = child.id(), "started hotkey daemon");
+        Ok(Self { job })
     }
 }
 
-pub(crate) fn uninstall(hook: HHOOK) {
-    // SAFETY: `hook` came from `install` on this thread.
-    let _ = unsafe { UnhookWindowsHookEx(hook) };
+impl Drop for HotkeyDaemon {
+    fn drop(&mut self) {
+        // SAFETY: closing the job we own; this kills the daemon.
+        let _ = unsafe { CloseHandle(self.job) };
+    }
+}
+
+/// Whether a kerys is running: it keeps a message-only window of class
+/// `kerys` for `kerys stop`, whoever started it.
+pub fn kerys_running() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, HWND_MESSAGE};
+    use windows::core::w;
+    // SAFETY: looking up a window by its static class name.
+    unsafe { FindWindowExW(Some(HWND_MESSAGE), None, w!("kerys"), None) }
+        .is_ok_and(|h| !h.is_invalid())
 }
