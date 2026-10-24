@@ -18,6 +18,8 @@ mod hover;
 #[cfg(windows)]
 mod monitor;
 #[cfg(windows)]
+mod opacity;
+#[cfg(windows)]
 mod platform;
 #[cfg(windows)]
 mod tray;
@@ -34,6 +36,8 @@ pub use hidden::restore_hidden_windows;
 pub use hotkeys::{HotkeyDaemon, kerys_running};
 #[cfg(windows)]
 pub use hover::set_focus_follows_mouse;
+#[cfg(windows)]
+pub use opacity::flush as flush_opacity;
 #[cfg(windows)]
 pub use platform::{Win32Platform, enable_dpi_awareness};
 #[cfg(windows)]

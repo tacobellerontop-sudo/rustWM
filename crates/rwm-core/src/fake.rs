@@ -37,6 +37,8 @@ pub struct FakePlatform {
     pub failing_spawns: Vec<String>,
     /// The focus border as last drawn.
     pub border: Option<Border>,
+    /// Opacity set on windows; missing means opaque.
+    pub opacity: BTreeMap<WindowHandle, u8>,
 }
 
 impl FakePlatform {
@@ -204,5 +206,20 @@ impl Platform for FakePlatform {
 
     fn set_border(&mut self, border: Option<Border>) {
         self.border = border;
+    }
+
+    fn set_cursor_pos(&mut self, x: i32, y: i32) -> Result<()> {
+        self.cursor = Some((x, y));
+        Ok(())
+    }
+
+    fn set_opacity(&mut self, handle: WindowHandle, alpha: u8) -> Result<()> {
+        self.get_mut(handle)?;
+        if alpha == 255 {
+            self.opacity.remove(&handle);
+        } else {
+            self.opacity.insert(handle, alpha);
+        }
+        Ok(())
     }
 }

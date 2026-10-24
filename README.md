@@ -2,9 +2,11 @@
 
 A keyboard-driven, dynamic tiling window manager for Windows 10/11, written in Rust.
 Inspired by komorebi and Hyprland: windows sit in an ordered list per workspace and a
-layout (dwindle, master-stack, monocle) computes where they go. One TOML config and an
-`rwm` CLI over a named pipe. Hotkeys come from [kerys](https://github.com/tacobellerontop-sudo/kerys),
-a separate hotkey daemon that rustWM starts for you.
+layout (dwindle, master-stack, monocle, columns, rows, grid, centred master) computes
+where they go. Windows can share a tile as a stack, float, pin, maximize or go fullscreen.
+One TOML config and an `rwm` CLI over a named pipe. Hotkeys come from
+[kerys](https://github.com/tacobellerontop-sudo/kerys), a separate hotkey daemon that
+rustWM starts for you.
 
 > Work in progress. See the milestones below for what works today.
 
@@ -67,14 +69,23 @@ broken file is reported in the log and the previous config keeps running.
 
 ```toml
 [general]
-default_layout = "dwindle"       # dwindle | master | monocle
+default_layout = "dwindle"       # dwindle | master | monocle | columns | rows | grid | center
+layout_cycle = ["dwindle", "master", "monocle"]   # what cycle-layout steps through
 new_window = "after-focused"     # after-focused: split the focused window in half (Hyprland)
                                  # end | start: split the last / first window
 workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 workspace_mode = "per-monitor"   # per-monitor | global (Win+Alt+W toggles)
 focus_follows_mouse = false      # focus windows by hovering, no click needed
+mouse_follows_focus = false      # put the mouse on windows focused with keys
+workspace_back_and_forth = false # workspace key of the current one goes back
+inactive_opacity = 1.0           # 0.1-1.0: translucent unfocused windows
 terminal = "wezterm-gui.exe"     # Win+Enter; defaults to wt.exe, then cmd.exe
 hotkeys = "kerys.exe"            # hotkey daemon to start; "" for none
+exec_on_start = ["yasb.exe"]     # run once when rustWM starts
+
+[workspace.9]                    # per-workspace layout and gaps
+layout = "monocle"
+gaps_inner = 0
 
 [gaps]
 inner = 8
@@ -88,7 +99,7 @@ color = "#89b4fa"
 
 [[rules]]
 match = { exe = "Spotify.exe" }  # exe/class: whole-value regex; title: regex search
-actions = ["workspace 9"]        # float | ignore | tile | workspace <name>
+actions = ["workspace 9"]        # float | ignore | tile | pin | workspace <name> | monitor <n>
 ```
 
 ### Windows that can't be resized
@@ -141,6 +152,34 @@ remembered. Dragging from the title bar moves it instead: drop it on another win
 swap them, or on another monitor to move it there. Floating windows move and resize
 freely.
 
+### Stacks, pinning, maximize (from komorebi and Hyprland)
+
+- **Stacks** (komorebi's stacks, Hyprland's groups): `stack left` puts the focused
+  window in the tile of its neighbour on the left. Only one window of a stack shows;
+  `cycle-stack next|prev` flips through them, `unstack` gives the window its own tile
+  again, `stack-all` / `unstack-all` do the whole workspace. Closing the shown window
+  shows the next one in the same tile. Status bars see stacks in `rwm query state`.
+- **Pin** (`toggle-pin`, or a `pin` rule): a floating window that stays on screen when
+  its monitor switches workspace, like a video player.
+- **Maximize** (`toggle-maximize`): fill the work area but keep gaps and the taskbar,
+  unlike `toggle-fullscreen`. Hyprland's `fullscreen 1`, komorebi's `toggle-maximize`.
+- **Focus last** (`focus last`): jump back to the previous window, switching workspace
+  if needed. `workspace last` does the same for workspaces, and
+  `workspace_back_and_forth` makes pressing the current workspace's key do it.
+- **Workspaces**: `workspace next|prev|empty`, `move-to-workspace 3 follow` (move and go
+  along), `swap-workspaces right` (trade windows with the next monitor).
+- **Layouts**: `columns`, `rows`, `grid` and `center` (the first window in the middle,
+  for ultrawide screens) join dwindle, master and monocle. `flip-layout horizontal|vertical`
+  mirrors any layout. In dwindle, `toggle-split` turns the split the focused window is in
+  between side-by-side and stacked (Hyprland's `togglesplit`).
+- **Keyboard resizing**: `resize left|right|up|down [pixels]` moves the edge between the
+  focused window and its neighbour (a floating window grows on that side), and
+  `move <dir>` nudges a floating window. `center` centres a floating window.
+- **Pause** (`toggle-pause`): leave all windows alone until resumed; windows opened in
+  between are picked up then. `unmanage` lets go of one window, `manage` forces rustWM
+  to take one it skipped.
+- **Translucent unfocused windows** (`inactive_opacity`) and **mouse follows focus**.
+
 ### Default keys
 
 These come from kerys. Change them in `%USERPROFILE%\.config\kerys\kerys.toml`; on its
@@ -175,12 +214,18 @@ there.
 ### Commands
 
 kerys bindings and `rwm <command>` use one command language:
-`focus <dir|next|prev>`, `move <dir|next|prev>`, `promote`, `close`, `terminal`,
-`exec <command line>`, `workspace <name|n>`, `move-to-workspace <name|n>`,
+`focus <dir|next|prev|last>`, `move <dir|next|prev>`, `promote`, `close`, `terminal`,
+`exec <command line>`, `workspace <name|n|next|prev|last|empty>`,
+`move-to-workspace <name|n> [follow]`, `swap-workspaces <dir>`,
 `workspace-mode <global|per-monitor|toggle>`,
-`focus-monitor <dir>`, `move-to-monitor <dir>`, `layout <dwindle|master|monocle|reset>`,
-`cycle-layout`, `resize <grow|shrink> [amount]`, `toggle-float`, `toggle-fullscreen`,
-`toggle-special [name]`, `retile`, `reload`, `restore`, `quit`.
+`focus-monitor <dir>`, `move-to-monitor <dir>`,
+`layout <dwindle|master|monocle|columns|rows|grid|center|reset>`,
+`cycle-layout [next|prev]`, `flip-layout <horizontal|vertical>`, `toggle-split`,
+`resize <grow|shrink> [amount]`, `resize <dir> [pixels]`, `toggle-float`,
+`toggle-fullscreen`, `toggle-maximize`, `toggle-pin`, `center`,
+`stack <dir>`, `unstack`, `cycle-stack <next|prev>`, `stack-all`, `unstack-all`,
+`toggle-special [name]`, `toggle-pause`, `manage`, `unmanage`,
+`retile`, `reload`, `restore`, `quit`.
 `move-to-workspace special:<name>` sends a window to a special workspace, and rules can use
 `workspace special:<name>` too. An empty special workspace opens your terminal when shown.
 

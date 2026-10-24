@@ -70,10 +70,19 @@ pub struct Workspace {
     pub focused: Option<WindowHandle>,
     /// A window covering the whole monitor, if any.
     pub fullscreen: Option<WindowHandle>,
+    /// A window filling the work area, if any.
+    pub maximized: Option<WindowHandle>,
     pub layout: LayoutKind,
     pub ratios: Ratios,
     /// How dwindle divides the space; see [`Tree`].
     pub tree: Tree,
+    /// Groups of windows sharing one tile (komorebi stacks, Hyprland
+    /// groups). The member that is in `tiled` is shown; the rest are hidden.
+    pub stacks: Vec<Vec<WindowHandle>>,
+    /// The layout is mirrored left-right.
+    pub flip_h: bool,
+    /// The layout is mirrored top-bottom.
+    pub flip_v: bool,
 }
 
 impl Workspace {
@@ -84,14 +93,18 @@ impl Workspace {
             floating: Vec::new(),
             focused: None,
             fullscreen: None,
+            maximized: None,
             layout,
             ratios: Ratios::default(),
             tree: Tree::default(),
+            stacks: Vec::new(),
+            flip_h: false,
+            flip_v: false,
         }
     }
 
     pub fn contains(&self, h: WindowHandle) -> bool {
-        self.tiled.contains(&h) || self.floating.contains(&h)
+        self.tiled.contains(&h) || self.floating.contains(&h) || self.stack_of(h).is_some()
     }
 
     pub fn is_floating(&self, h: WindowHandle) -> bool {
@@ -102,9 +115,173 @@ impl Workspace {
         self.tiled.is_empty() && self.floating.is_empty()
     }
 
-    /// Every window: tiled in layout order, then floating.
+    /// Every window on screen when the workspace is: tiled in layout order,
+    /// then floating. Leaves out windows hidden in stacks.
     pub fn windows(&self) -> impl Iterator<Item = WindowHandle> + '_ {
         self.tiled.iter().chain(&self.floating).copied()
+    }
+
+    /// Every window, including those hidden behind others in a stack.
+    pub fn all(&self) -> impl Iterator<Item = WindowHandle> + '_ {
+        self.windows().chain(self.stacked_hidden())
+    }
+
+    /// Windows hidden behind the shown member of their stack.
+    pub fn stacked_hidden(&self) -> impl Iterator<Item = WindowHandle> + '_ {
+        self.stacks
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|h| !self.tiled.contains(h))
+    }
+
+    /// The index of the stack `h` is in.
+    pub fn stack_of(&self, h: WindowHandle) -> Option<usize> {
+        self.stacks.iter().position(|s| s.contains(&h))
+    }
+
+    /// Puts `new` in tiled window `old`'s slot, keeping focus, fullscreen and
+    /// maximize on the slot.
+    fn replace_tiled(&mut self, old: WindowHandle, new: WindowHandle) {
+        if let Some(i) = self.index_of(old) {
+            self.tiled[i] = new;
+            self.tree.replace(old, new);
+            for slot in [&mut self.focused, &mut self.fullscreen, &mut self.maximized] {
+                if *slot == Some(old) {
+                    *slot = Some(new);
+                }
+            }
+        }
+    }
+
+    /// Takes `h` out of its stack. If it was the shown member, the next one
+    /// takes over its slot and is returned (the caller shows it); a stack
+    /// left with one window stops being a stack. `h` itself leaves `tiled`.
+    pub fn leave_stack(&mut self, h: WindowHandle) -> Option<WindowHandle> {
+        let si = self.stack_of(h)?;
+        let shown = self.tiled.contains(&h);
+        let stack = &mut self.stacks[si];
+        let i = stack.iter().position(|x| *x == h)?;
+        stack.remove(i);
+        let next = (shown && !stack.is_empty()).then(|| stack[i.min(stack.len() - 1)]);
+        if stack.len() <= 1 {
+            self.stacks.remove(si);
+        }
+        match next {
+            Some(n) => {
+                self.replace_tiled(h, n);
+                Some(n)
+            }
+            None => {
+                self.tiled.retain(|x| *x != h);
+                self.tree.remove(h);
+                None
+            }
+        }
+    }
+
+    /// Moves tiled window `h` into tiled window `target`'s tile (joining its
+    /// stack, or starting one) and shows `h` there. Returns whether it did.
+    pub fn stack_onto(&mut self, h: WindowHandle, target: WindowHandle) -> bool {
+        if h == target || self.index_of(h).is_none() || self.index_of(target).is_none() {
+            return false;
+        }
+        let focused = self.focused;
+        self.leave_stack(h);
+        self.tiled.retain(|x| *x != h);
+        self.tree.remove(h);
+        let si = self.stack_of(target).unwrap_or_else(|| {
+            self.stacks.push(vec![target]);
+            self.stacks.len() - 1
+        });
+        let at = self.stacks[si]
+            .iter()
+            .position(|x| *x == target)
+            .unwrap_or(0)
+            + 1;
+        self.stacks[si].insert(at, h);
+        self.replace_tiled(target, h);
+        if focused == Some(h) || focused == Some(target) {
+            self.focused = Some(h);
+        }
+        true
+    }
+
+    /// Shows the member `step` places from shown member `h` in its stack.
+    /// Returns the window now shown.
+    pub fn cycle_stack(&mut self, h: WindowHandle, step: isize) -> Option<WindowHandle> {
+        let stack = &self.stacks[self.stack_of(h)?];
+        if !self.tiled.contains(&h) {
+            return None;
+        }
+        let i = stack.iter().position(|x| *x == h)? as isize;
+        let next = stack[(i + step).rem_euclid(stack.len() as isize) as usize];
+        if next == h {
+            return None;
+        }
+        self.replace_tiled(h, next);
+        Some(next)
+    }
+
+    /// Takes shown member `h` out of its stack into a tile of its own next
+    /// to it. Returns whether it did.
+    pub fn unstack(&mut self, h: WindowHandle) -> bool {
+        if !self.tiled.contains(&h) {
+            return false;
+        }
+        let Some(next) = self.leave_stack(h) else {
+            return false;
+        };
+        self.tree.insert(h, Some(next), false);
+        let at = self.index_of(next).map_or(self.tiled.len(), |i| i + 1);
+        self.tiled.insert(at, h);
+        self.focused = Some(h);
+        true
+    }
+
+    /// Stacks every tile into the focused one (or the first).
+    pub fn stack_all(&mut self) {
+        let Some(&first) = self.tiled.first() else {
+            return;
+        };
+        let target = self
+            .focused
+            .filter(|f| self.tiled.contains(f))
+            .unwrap_or(first);
+        for other in self.tiled.clone() {
+            if other == target {
+                continue;
+            }
+            let members = match self.stack_of(other) {
+                Some(si) => self.stacks.remove(si),
+                None => vec![other],
+            };
+            self.tiled.retain(|x| *x != other);
+            self.tree.remove(other);
+            let si = self.stack_of(target).unwrap_or_else(|| {
+                self.stacks.push(vec![target]);
+                self.stacks.len() - 1
+            });
+            self.stacks[si].extend(members);
+        }
+    }
+
+    /// Gives every stacked window a tile of its own again.
+    pub fn unstack_all(&mut self) {
+        for stack in std::mem::take(&mut self.stacks) {
+            let Some(mut anchor) = stack.iter().copied().find(|h| self.tiled.contains(h)) else {
+                continue;
+            };
+            for h in stack {
+                if self.tiled.contains(&h) {
+                    continue;
+                }
+                self.tree.insert(h, Some(anchor), false);
+                let at = self.index_of(anchor).map_or(self.tiled.len(), |i| i + 1);
+                self.tiled.insert(at, h);
+                anchor = h;
+            }
+        }
     }
 
     /// Adds a window as tiled (at `pos`) or floating.
@@ -144,6 +321,24 @@ impl Workspace {
     /// Removes a window. If it was focused, focus moves to the tiled window
     /// that took its place (or the new last one), else to a floating one.
     pub fn remove(&mut self, h: WindowHandle) -> bool {
+        if self.stack_of(h).is_some() {
+            let was_focused = self.focused == Some(h);
+            let next = self.leave_stack(h);
+            if let Some(n) = next {
+                // Its stack-mate took the slot (and focus, fullscreen, maximize).
+                if was_focused {
+                    self.focused = Some(n);
+                }
+                return true;
+            }
+            if !self.tiled.contains(&h) && !self.floating.contains(&h) {
+                // A hidden member, or the last of its stack already untiled.
+                if self.focused == Some(h) {
+                    self.focused = self.tiled.last().copied();
+                }
+                return true;
+            }
+        }
         self.tree.remove(h);
         let successor = if let Some(i) = self.index_of(h) {
             self.tiled.remove(i);
@@ -162,6 +357,9 @@ impl Workspace {
         if self.fullscreen == Some(h) {
             self.fullscreen = None;
         }
+        if self.maximized == Some(h) {
+            self.maximized = None;
+        }
         true
     }
 
@@ -173,9 +371,16 @@ impl Workspace {
     }
 
     /// Stops tiling `h` (e.g. it starts floating) without touching focus.
+    /// A stack-mate takes its slot if it had one.
     pub fn untile(&mut self, h: WindowHandle) {
+        if self.stack_of(h).is_some() {
+            self.leave_stack(h);
+        }
         self.tiled.retain(|x| *x != h);
         self.tree.remove(h);
+        if self.maximized == Some(h) {
+            self.maximized = None;
+        }
     }
 
     /// The window `step` places away from `from` in list order (tiled, then
@@ -194,6 +399,8 @@ pub struct Monitor {
     pub info: MonitorInfo,
     pub workspaces: Vec<Workspace>,
     pub active: usize,
+    /// The workspace shown before the active one, for `workspace last`.
+    pub last_active: Option<usize>,
 }
 
 impl Monitor {
@@ -210,6 +417,7 @@ impl Monitor {
             info,
             workspaces,
             active: 0,
+            last_active: None,
         }
     }
 
@@ -321,5 +529,66 @@ mod tests {
         assert_eq!(w.cycle(WindowHandle(3), 1), Some(WindowHandle(1)));
         assert_eq!(w.cycle(WindowHandle(1), -1), Some(WindowHandle(3)));
         assert_eq!(ws(&[1]).cycle(WindowHandle(1), 1), None);
+    }
+
+    #[test]
+    fn stacking_shares_a_tile() {
+        let mut w = Workspace::new("1", LayoutKind::Dwindle);
+        for i in 1..=3 {
+            w.insert(WindowHandle(i), InsertPos::End);
+        }
+        w.focused = Some(WindowHandle(3));
+        assert!(w.stack_onto(WindowHandle(3), WindowHandle(1)));
+        // 3 shows in 1's slot; 1 is hidden behind it.
+        assert_eq!(ids(&w), vec![3, 2]);
+        assert_eq!(w.stacks, vec![vec![WindowHandle(1), WindowHandle(3)]]);
+        assert_eq!(
+            w.stacked_hidden().collect::<Vec<_>>(),
+            vec![WindowHandle(1)]
+        );
+        assert!(w.contains(WindowHandle(1)));
+        assert_eq!(w.focused, Some(WindowHandle(3)));
+
+        assert_eq!(w.cycle_stack(WindowHandle(3), 1), Some(WindowHandle(1)));
+        assert_eq!(ids(&w), vec![1, 2]);
+        assert_eq!(w.focused, Some(WindowHandle(1)));
+
+        // Closing the shown member reveals the next one in the same slot.
+        assert!(w.remove(WindowHandle(1)));
+        assert_eq!(ids(&w), vec![3, 2]);
+        assert!(w.stacks.is_empty());
+        assert_eq!(w.focused, Some(WindowHandle(3)));
+    }
+
+    #[test]
+    fn unstack_and_stack_all() {
+        let mut w = Workspace::new("1", LayoutKind::Dwindle);
+        for i in 1..=4 {
+            w.insert(WindowHandle(i), InsertPos::End);
+        }
+        w.focused = Some(WindowHandle(2));
+        w.stack_all();
+        assert_eq!(ids(&w), vec![2]);
+        assert_eq!(w.all().count(), 4);
+        assert!(w.unstack(WindowHandle(2)));
+        assert_eq!(w.tiled.len(), 2);
+        assert_eq!(w.focused, Some(WindowHandle(2)));
+        w.unstack_all();
+        assert_eq!(w.tiled.len(), 4);
+        assert!(w.stacks.is_empty());
+        assert_eq!(w.tree.leaves().len(), 4);
+    }
+
+    #[test]
+    fn removing_a_hidden_member_keeps_the_slot() {
+        let mut w = Workspace::new("1", LayoutKind::Dwindle);
+        w.insert(WindowHandle(1), InsertPos::End);
+        w.insert(WindowHandle(2), InsertPos::End);
+        w.stack_onto(WindowHandle(2), WindowHandle(1));
+        w.remove(WindowHandle(1));
+        assert_eq!(ids(&w), vec![2]);
+        assert!(w.stacks.is_empty());
+        w.untile(WindowHandle(2));
+        assert!(w.tiled.is_empty() && w.tree.leaves().is_empty());
     }
 }

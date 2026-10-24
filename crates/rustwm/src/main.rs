@@ -196,6 +196,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         }
     }
     wm.restore();
+    rwm_win32::flush_opacity();
     drop(hotkeys);
     events.stop();
     tracing::info!("rustWM stopped");
