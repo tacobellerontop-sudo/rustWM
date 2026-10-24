@@ -130,6 +130,10 @@ impl Platform for FakePlatform {
         self.windows.get(&handle).cloned()
     }
 
+    fn min_size(&self, handle: WindowHandle) -> Option<(i32, i32)> {
+        self.min_size.get(&handle).copied()
+    }
+
     fn foreground(&self) -> Option<WindowHandle> {
         self.foreground
     }

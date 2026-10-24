@@ -198,7 +198,7 @@ fn spawn_verifier(
     use std::time::Duration;
 
     /// Windows resize asynchronously; give them this long to settle.
-    const SETTLE: Duration = Duration::from_millis(750);
+    const SETTLE: Duration = Duration::from_millis(300);
     let (kick, kicks) = channel::<()>();
     std::thread::Builder::new()
         .name("verify".into())

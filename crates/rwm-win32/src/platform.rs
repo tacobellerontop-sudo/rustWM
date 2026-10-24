@@ -83,6 +83,61 @@ impl Platform for Win32Platform {
         window::info(window::hwnd(handle))
     }
 
+    fn min_size(&self, handle: WindowHandle) -> Option<(i32, i32)> {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, MINMAXINFO, SM_CXMINTRACK, SM_CYMINTRACK, SMTO_ABORTIFHUNG,
+            SMTO_ERRORONEXIT, SendMessageTimeoutW, WM_GETMINMAXINFO,
+        };
+        let hwnd = self.checked(handle).ok()?;
+        // SAFETY: no preconditions.
+        let system = unsafe {
+            (
+                GetSystemMetrics(SM_CXMINTRACK),
+                GetSystemMetrics(SM_CYMINTRACK),
+            )
+        };
+        // Windows fills in defaults before an app sees this message and the
+        // app only changes what it cares about, so start from the defaults.
+        let mut mmi = MINMAXINFO::default();
+        mmi.ptMinTrackSize.x = system.0;
+        mmi.ptMinTrackSize.y = system.1;
+        mmi.ptMaxTrackSize.x = i32::MAX;
+        mmi.ptMaxTrackSize.y = i32::MAX;
+        // SAFETY: WM_GETMINMAXINFO is a system message, so Windows copies the
+        // MINMAXINFO into the target process and back. The timeout keeps a
+        // hung app from blocking us.
+        let ok = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                WM_GETMINMAXINFO,
+                WPARAM(0),
+                LPARAM(&mut mmi as *mut MINMAXINFO as isize),
+                SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                100,
+                None,
+            )
+        };
+        if ok.0 == 0 {
+            return None;
+        }
+        let (w, h) = (mmi.ptMinTrackSize.x, mmi.ptMinTrackSize.y);
+        // The system default means the app sets no minimum of its own.
+        if w <= system.0 && h <= system.1 {
+            return None;
+        }
+        // The minimum is for the whole window; we lay out visible frames.
+        let (bw, bh) = match (window::window_rect(hwnd), window::frame_rect(hwnd)) {
+            (Some(o), Some(f)) => (
+                (o.right - o.left) - (f.right - f.left),
+                (o.bottom - o.top) - (f.bottom - f.top),
+            ),
+            _ => (0, 0),
+        };
+        tracing::debug!(?handle, w, h, "minimum window size");
+        Some(((w - bw).max(0), (h - bh).max(0)))
+    }
+
     fn foreground(&self) -> Option<WindowHandle> {
         // SAFETY: GetForegroundWindow has no preconditions.
         let hwnd = unsafe { GetForegroundWindow() };

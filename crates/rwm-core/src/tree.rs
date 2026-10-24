@@ -4,6 +4,12 @@
 //! The workspace's ordered `tiled` list stays the source of truth for which
 //! windows tile; the tree only remembers how their space is divided. Each
 //! split cuts along the longer side of its rect, like Hyprland's default.
+//!
+//! Windows can have a minimum size (a console that won't go below so many
+//! columns). Splits move just enough to give such windows their minimum when
+//! the space allows, instead of letting them overflow onto their neighbours.
+
+use std::collections::HashMap;
 
 use crate::layout::{DEFAULT_RATIO, Gaps, MAX_RATIO, MIN_RATIO};
 use crate::{Rect, WindowHandle};
@@ -18,6 +24,13 @@ enum Node {
         second: Box<Node>,
     },
 }
+
+/// Known minimum (width, height) of windows, in physical pixels.
+pub type Mins = HashMap<WindowHandle, (i32, i32)>;
+
+/// The least space a window without a known minimum is squeezed down to when
+/// a neighbour needs room.
+const FLOOR: (i32, i32) = (150, 100);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Tree {
@@ -95,7 +108,7 @@ impl Node {
         }
     }
 
-    fn arrange(&self, r: Rect, gap: i32, out: &mut Vec<(WindowHandle, Rect)>) {
+    fn arrange(&self, r: Rect, gap: i32, mins: &Mins, out: &mut Vec<(WindowHandle, Rect)>) {
         match self {
             Node::Leaf(h) => out.push((*h, r)),
             Node::Split {
@@ -103,9 +116,64 @@ impl Node {
                 first,
                 second,
             } => {
+                let ratio = fitted_ratio(*ratio, first, second, r, gap, mins);
+                let (a, b) = split(r, ratio, gap);
+                first.arrange(a, gap, mins, out);
+                second.arrange(b, gap, mins, out);
+            }
+        }
+    }
+}
+
+/// `ratio`, moved if needed so both children get at least their minimum size
+/// along the split. If they can't both fit, the space is shared in
+/// proportion to their minimums.
+fn fitted_ratio(ratio: f32, first: &Node, second: &Node, r: Rect, gap: i32, mins: &Mins) -> f32 {
+    if mins.is_empty() {
+        return ratio;
+    }
+    let along = |(w, h): (i32, i32)| if r.w >= r.h { w } else { h };
+    let usable = (along((r.w, r.h)) - gap).max(1);
+    let wanted = (usable as f32 * ratio).round() as i32;
+    // A child's minimum depends on its own shape (dwindle splits the longer
+    // side), which depends on this split: go round until it settles.
+    let mut ratio_now = ratio;
+    for _ in 0..4 {
+        let (a, b) = split(r, ratio_now, gap);
+        let need_a = along(first.min_size(a, gap, mins));
+        let need_b = along(second.min_size(b, gap, mins));
+        let first_len = if need_a + need_b > usable {
+            (usable as i64 * need_a as i64 / (need_a + need_b).max(1) as i64) as i32
+        } else {
+            wanted.max(need_a).min(usable - need_b)
+        };
+        let next = first_len as f32 / usable as f32;
+        if (next - ratio_now).abs() < f32::EPSILON {
+            break;
+        }
+        ratio_now = next;
+    }
+    ratio_now
+}
+
+impl Node {
+    /// The smallest (width, height) this subtree can take in `r`.
+    fn min_size(&self, r: Rect, gap: i32, mins: &Mins) -> (i32, i32) {
+        match self {
+            Node::Leaf(h) => mins.get(h).copied().unwrap_or(FLOOR),
+            Node::Split {
+                ratio,
+                first,
+                second,
+            } => {
                 let (a, b) = split(r, *ratio, gap);
-                first.arrange(a, gap, out);
-                second.arrange(b, gap, out);
+                let (aw, ah) = first.min_size(a, gap, mins);
+                let (bw, bh) = second.min_size(b, gap, mins);
+                if r.w >= r.h {
+                    (aw + gap + bw, ah.max(bh))
+                } else {
+                    (aw.max(bw), ah + gap + bh)
+                }
             }
         }
     }
@@ -234,6 +302,7 @@ impl Tree {
         windows: &[WindowHandle],
         area: Rect,
         gaps: Gaps,
+        mins: &Mins,
     ) -> Vec<(WindowHandle, Rect)> {
         let tree = self.reconciled(windows);
         let gaps = if gaps.smart && windows.len() == 1 {
@@ -247,7 +316,7 @@ impl Tree {
         };
         let mut out = Vec::with_capacity(windows.len());
         if let Some(root) = &tree.root {
-            root.arrange(area.inset(gaps.outer), gaps.inner, &mut out);
+            root.arrange(area.inset(gaps.outer), gaps.inner, mins, &mut out);
         }
         out
     }
@@ -290,13 +359,14 @@ impl Tree {
         windows: &[WindowHandle],
         area: Rect,
         gaps: Gaps,
+        mins: &Mins,
         target: Rect,
     ) -> bool {
         // Work on exactly what is on screen. Callers don't fit while a window
         // is hidden from the tree (fullscreen), so nothing is lost.
         let mut t = self.reconciled(windows);
         let error = |t: &Tree| {
-            t.arrange(windows, area, gaps)
+            t.arrange(windows, area, gaps, mins)
                 .into_iter()
                 .find(|(w, _)| *w == h)
                 .map_or(i32::MAX, |(_, r)| {
@@ -363,7 +433,7 @@ mod tests {
     }
 
     fn rect_of(t: &Tree, windows: &[WindowHandle], h: isize) -> Rect {
-        t.arrange(windows, AREA, NO_GAPS)
+        t.arrange(windows, AREA, NO_GAPS, &Mins::new())
             .into_iter()
             .find(|(w, _)| *w == W(h))
             .unwrap()
@@ -377,7 +447,7 @@ mod tests {
             t.insert(W(i), None, false);
         }
         let got: Vec<Rect> = t
-            .arrange(&ids(5), AREA, NO_GAPS)
+            .arrange(&ids(5), AREA, NO_GAPS, &Mins::new())
             .into_iter()
             .map(|x| x.1)
             .collect();
@@ -424,7 +494,11 @@ mod tests {
         t.insert(W(2), None, false);
         // Window 2 fullscreen: 1 gets everything. Window 3 unknown: appended.
         assert_eq!(rect_of(&t, &[W(1)], 1), AREA);
-        assert_eq!(t.arrange(&[W(1), W(2), W(3)], AREA, NO_GAPS).len(), 3);
+        assert_eq!(
+            t.arrange(&[W(1), W(2), W(3)], AREA, NO_GAPS, &Mins::new())
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -451,9 +525,43 @@ mod tests {
         }
         // Drag window 3's top edge (bottom right) up from 520 to 300.
         let target = Rect::new(960, 300, 960, 740);
-        assert!(t.fit(W(3), &ids(3), AREA, NO_GAPS, target));
+        assert!(t.fit(W(3), &ids(3), AREA, NO_GAPS, &Mins::new(), target));
         let r = rect_of(&t, &ids(3), 3);
         assert!((r.y - 300).abs() <= 5, "{r:?}");
         assert_eq!(rect_of(&t, &ids(3), 1).w, 960);
+    }
+
+    #[test]
+    fn splits_make_room_for_minimum_sizes() {
+        let mut t = Tree::default();
+        t.insert(W(1), None, false);
+        t.insert(W(2), None, false);
+        let mut mins = Mins::new();
+        // Window 2 needs 1200px: window 1 gives way.
+        mins.insert(W(2), (1200, 300));
+        let got = t.arrange(&ids(2), AREA, NO_GAPS, &mins);
+        assert_eq!(got[1].1, Rect::new(720, 0, 1200, 1040));
+        assert_eq!(got[0].1, Rect::new(0, 0, 720, 1040));
+        // Both need more than there is: shared by their minimums.
+        mins.insert(W(1), (1200, 300));
+        let got = t.arrange(&ids(2), AREA, NO_GAPS, &mins);
+        assert_eq!(got[0].1.w, 960);
+
+        // Nested: 1 | (2 over 3); 3 needs 1100 wide, so the outer split moves
+        // and nobody is squeezed below the floor.
+        let mut t = Tree::default();
+        for i in 1..=3 {
+            t.insert(W(i), None, false);
+        }
+        let mut mins = Mins::new();
+        mins.insert(W(3), (1100, 200));
+        let got = t.arrange(&ids(3), AREA, NO_GAPS, &mins);
+        assert!(got[2].1.w >= 1100, "{got:?}");
+        assert!(
+            got.iter().all(|(_, r)| r.w >= FLOOR.0 && r.h >= FLOOR.1),
+            "{got:?}"
+        );
+        let covered: i64 = got.iter().map(|(_, r)| r.w as i64 * r.h as i64).sum();
+        assert_eq!(covered, 1920 * 1040);
     }
 }

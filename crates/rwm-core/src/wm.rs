@@ -7,6 +7,7 @@ use crate::geometry::Direction;
 use crate::layout::{Gaps, LayoutKind};
 use crate::rules::{self, Rule, Verdict};
 use crate::state::{MonitorState, State, WindowState, WorkspaceState};
+use crate::tree::Mins;
 use crate::workspace::{InsertPos, Monitor, Workspace, WorkspaceMode};
 use crate::{Border, Event, Platform, Rect, WindowHandle, WindowInfo};
 
@@ -141,6 +142,9 @@ pub struct Wm<P: Platform> {
     moving: Option<WindowHandle>,
     /// The border as last drawn.
     border: Option<Border>,
+    /// Minimum sizes of windows that have one, asked for when they open or
+    /// learned when they refuse a smaller slot.
+    mins: Mins,
     /// We just focused the desktop; its focus event must not move the
     /// focused monitor to wherever the mouse is.
     desktop_focus_pending: bool,
@@ -169,6 +173,7 @@ impl<P: Platform> Wm<P> {
             verify_pending: false,
             moving: None,
             border: None,
+            mins: Mins::new(),
             desktop_focus_pending: false,
         }
     }
@@ -193,6 +198,9 @@ impl<P: Platform> Wm<P> {
             }
             let monitor = self.monitor_at(w.rect).unwrap_or(0);
             let verdict = self.verdict_for(&w);
+            if let Some(min) = self.platform.min_size(w.handle) {
+                self.mins.insert(w.handle, min);
+            }
             debug!(handle = ?w.handle, exe = %w.exe, title = %w.title, ?verdict, "adopting window");
             if self
                 .place(w.handle, monitor, &verdict, InsertPos::End)
@@ -581,11 +589,66 @@ impl<P: Platform> Wm<P> {
             }
         }
         let pos = self.settings.new_window;
+        if let Some((mw, mh)) = self.platform.min_size(h) {
+            self.mins.insert(h, (mw, mh));
+        }
         if let Some(loc) = self.place(h, self.focused_monitor, &verdict, pos) {
             self.meta.insert(h, Meta::from(&w));
             if self.is_visible(loc) {
                 self.ws_mut(loc).focused = Some(h);
             }
+            // Known not to fit even after the layout made room: float it now,
+            // instead of tiling it and floating it once it refuses its slot.
+            if !self.fits_its_slot(h, loc) {
+                let size = self.mins.get(&h).copied().unwrap_or((w.rect.w, w.rect.h));
+                info!(handle = ?h, exe = %w.exe, min = ?size, "window is too big for any slot, floating it");
+                self.float_centred(h, loc, (size.0.max(w.rect.w), size.1.max(w.rect.h)));
+            }
+        }
+    }
+
+    /// Whether tiled window `h` gets at least its minimum size where the
+    /// layout puts it. True for floating windows and windows without one.
+    fn fits_its_slot(&self, h: WindowHandle, loc: Loc) -> bool {
+        /// Pixels of slack before a window counts as not fitting.
+        const TOLERANCE: i32 = 8;
+        let Some(&(mw, mh)) = self.mins.get(&h) else {
+            return true;
+        };
+        if self.force_tiled.contains(&h) || self.ws(loc).is_floating(h) {
+            return true;
+        }
+        let Some((area, gaps)) = self.layout_area(loc) else {
+            return true;
+        };
+        arrange(self.ws(loc), area, area, gaps, &self.mins)
+            .into_iter()
+            .find(|(x, _)| *x == h)
+            .is_none_or(|(_, r)| r.w + TOLERANCE >= mw && r.h + TOLERANCE >= mh)
+    }
+
+    /// Floats `h` at `size` (at most the work area), centred on its monitor.
+    fn float_centred(&mut self, h: WindowHandle, loc: Loc, size: (i32, i32)) {
+        let ws = self.ws_mut(loc);
+        ws.untile(h);
+        if !ws.floating.contains(&h) {
+            ws.floating.push(h);
+        }
+        self.applied.remove(&h);
+        let mi = match loc {
+            Loc::Ws { monitor, .. } => monitor,
+            Loc::Special(_) => self.special_shown.map_or(self.focused_monitor, |(_, m)| m),
+        };
+        let area = self.monitors[mi].info.work_area;
+        let (ww, wh) = (size.0.min(area.w), size.1.min(area.h));
+        let rect = Rect::new(
+            area.x + (area.w - ww) / 2,
+            area.y + (area.h - wh) / 2,
+            ww,
+            wh,
+        );
+        if let Err(e) = self.platform.set_rects(&[(h, rect)]) {
+            warn!(error = %e, "could not place floating window");
         }
     }
 
@@ -627,28 +690,32 @@ impl<P: Platform> Wm<P> {
             }
         }
         for (h, loc, w) in refused {
-            info!(handle = ?h, exe = %w.exe, title = %w.title, slot = ?self.applied.get(&h), actual = ?w.rect,
-                "window refused its tile size, floating it");
-            let ws = self.ws_mut(loc);
-            ws.untile(h);
-            ws.floating.push(h);
-            self.applied.remove(&h);
-            // Keep its own size, centred on its monitor.
-            let mi = match loc {
-                Loc::Ws { monitor, .. } => monitor,
-                Loc::Special(_) => self.special_shown.map_or(self.focused_monitor, |(_, m)| m),
-            };
-            let area = self.monitors[mi].info.work_area;
-            let (ww, wh) = (w.rect.w.min(area.w), w.rect.h.min(area.h));
-            let rect = Rect::new(
-                area.x + (area.w - ww) / 2,
-                area.y + (area.h - wh) / 2,
-                ww,
-                wh,
+            // Remember how big it insists on being, and first try to make
+            // room for it by moving the splits (like a minimum size we knew
+            // up front). Only if that can't work does it float.
+            let slot = self.applied.get(&h).copied().unwrap_or(w.rect);
+            let known = self.mins.get(&h).copied().unwrap_or((0, 0));
+            let min = (
+                if w.rect.w > slot.w + TOLERANCE {
+                    w.rect.w
+                } else {
+                    known.0
+                },
+                if w.rect.h > slot.h + TOLERANCE {
+                    w.rect.h
+                } else {
+                    known.1
+                },
             );
-            if let Err(e) = self.platform.set_rects(&[(h, rect)]) {
-                warn!(error = %e, "could not place floating window");
+            self.mins
+                .insert(h, (min.0.max(known.0), min.1.max(known.1)));
+            if self.fits_its_slot(h, loc) {
+                info!(handle = ?h, exe = %w.exe, min = ?min, "window needs more room, re-tiling");
+                continue;
             }
+            info!(handle = ?h, exe = %w.exe, title = %w.title, ?slot, actual = ?w.rect,
+                "window refused its tile size, floating it");
+            self.float_centred(h, loc, (w.rect.w, w.rect.h));
         }
     }
 
@@ -743,6 +810,7 @@ impl<P: Platform> Wm<P> {
         let Some((area, gaps)) = self.layout_area(loc) else {
             return false;
         };
+        let mins = self.mins.clone();
         let ws = self.ws_mut(loc);
         if ws.fullscreen.is_some() {
             return false;
@@ -753,7 +821,7 @@ impl<P: Platform> Wm<P> {
         let (layout, count) = (ws.layout, ws.tiled.len());
         if layout == LayoutKind::Dwindle {
             let tiled = ws.tiled.clone();
-            return ws.tree.fit(h, &tiled, area, gaps, rect);
+            return ws.tree.fit(h, &tiled, area, gaps, &mins, rect);
         }
         layout.fit(&mut ws.ratios, index, count, area, gaps, rect)
     }
@@ -822,6 +890,7 @@ impl<P: Platform> Wm<P> {
             self.applied.remove(&h);
             self.meta.remove(&h);
             self.force_tiled.remove(&h);
+            self.mins.remove(&h);
         }
     }
 
@@ -1372,13 +1441,25 @@ impl<P: Platform> Wm<P> {
         let mut slots = Vec::new();
         for m in &self.monitors {
             let gaps = self.settings.gaps.scaled(m.info.scale);
-            slots.extend(arrange(m.workspace(), m.info.work_area, m.info.rect, gaps));
+            slots.extend(arrange(
+                m.workspace(),
+                m.info.work_area,
+                m.info.rect,
+                gaps,
+                &self.mins,
+            ));
         }
         if let Some((i, mi)) = self.special_shown {
             if let Some(m) = self.monitors.get(mi) {
                 let overlay = special_overlay(m.info.work_area);
                 let gaps = self.settings.gaps.scaled(m.info.scale);
-                slots.extend(arrange(&self.specials[i], overlay, overlay, gaps));
+                slots.extend(arrange(
+                    &self.specials[i],
+                    overlay,
+                    overlay,
+                    gaps,
+                    &self.mins,
+                ));
             }
         }
         let moves: Vec<_> = slots
@@ -1432,7 +1513,13 @@ fn special_overlay(area: Rect) -> Rect {
 }
 
 /// The target rect of every tiled (and fullscreen) window of a workspace.
-fn arrange(ws: &Workspace, area: Rect, full: Rect, gaps: Gaps) -> Vec<(WindowHandle, Rect)> {
+fn arrange(
+    ws: &Workspace,
+    area: Rect,
+    full: Rect,
+    gaps: Gaps,
+    mins: &Mins,
+) -> Vec<(WindowHandle, Rect)> {
     let fullscreen = ws.fullscreen.filter(|h| ws.contains(*h));
     let tiled: Vec<_> = ws
         .tiled
@@ -1441,7 +1528,7 @@ fn arrange(ws: &Workspace, area: Rect, full: Rect, gaps: Gaps) -> Vec<(WindowHan
         .filter(|h| Some(*h) != fullscreen)
         .collect();
     let mut out = if ws.layout == LayoutKind::Dwindle {
-        ws.tree.arrange(&tiled, area, gaps)
+        ws.tree.arrange(&tiled, area, gaps, mins)
     } else {
         let rects = ws.layout.arrange(tiled.len(), area, gaps, &ws.ratios);
         tiled.into_iter().zip(rects).collect()

@@ -56,6 +56,12 @@ pub trait Platform {
     /// Fresh information about one window, or `None` if it is gone.
     fn window_info(&self, handle: WindowHandle) -> Option<WindowInfo>;
 
+    /// The smallest (width, height) the window lets itself be sized to, if
+    /// it says.
+    fn min_size(&self, _handle: WindowHandle) -> Option<(i32, i32)> {
+        None
+    }
+
     /// The current foreground window, if any.
     fn foreground(&self) -> Option<WindowHandle>;
 
