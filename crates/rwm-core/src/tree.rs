@@ -20,6 +20,9 @@ enum Node {
     Split {
         /// Share of the first child.
         ratio: f32,
+        /// Split along the shorter side instead of the longer one
+        /// (`toggle-split`).
+        flipped: bool,
         first: Box<Node>,
         second: Box<Node>,
     },
@@ -63,6 +66,7 @@ impl Node {
                 let (a, b) = if new_first { (h, anchor) } else { (anchor, h) };
                 *self = Node::Split {
                     ratio: DEFAULT_RATIO,
+                    flipped: false,
                     first: Box::new(Node::Leaf(a)),
                     second: Box::new(Node::Leaf(b)),
                 };
@@ -83,11 +87,13 @@ impl Node {
             leaf @ Node::Leaf(_) => Some(leaf),
             Node::Split {
                 ratio,
+                flipped,
                 first,
                 second,
             } => match (first.without(h), second.without(h)) {
                 (Some(a), Some(b)) => Some(Node::Split {
                     ratio,
+                    flipped,
                     first: Box::new(a),
                     second: Box::new(b),
                 }),
@@ -113,11 +119,12 @@ impl Node {
             Node::Leaf(h) => out.push((*h, r)),
             Node::Split {
                 ratio,
+                flipped,
                 first,
                 second,
             } => {
-                let ratio = fitted_ratio(*ratio, first, second, r, gap, mins);
-                let (a, b) = split(r, ratio, gap);
+                let ratio = fitted_ratio(*ratio, *flipped, first, second, r, gap, mins);
+                let (a, b) = split(r, ratio, gap, *flipped);
                 first.arrange(a, gap, mins, out);
                 second.arrange(b, gap, mins, out);
             }
@@ -128,18 +135,27 @@ impl Node {
 /// `ratio`, moved if needed so both children get at least their minimum size
 /// along the split. If they can't both fit, the space is shared in
 /// proportion to their minimums.
-fn fitted_ratio(ratio: f32, first: &Node, second: &Node, r: Rect, gap: i32, mins: &Mins) -> f32 {
+fn fitted_ratio(
+    ratio: f32,
+    flipped: bool,
+    first: &Node,
+    second: &Node,
+    r: Rect,
+    gap: i32,
+    mins: &Mins,
+) -> f32 {
     if mins.is_empty() {
         return ratio;
     }
-    let along = |(w, h): (i32, i32)| if r.w >= r.h { w } else { h };
+    let across = side_by_side(r, flipped);
+    let along = |(w, h): (i32, i32)| if across { w } else { h };
     let usable = (along((r.w, r.h)) - gap).max(1);
     let wanted = (usable as f32 * ratio).round() as i32;
     // A child's minimum depends on its own shape (dwindle splits the longer
     // side), which depends on this split: go round until it settles.
     let mut ratio_now = ratio;
     for _ in 0..4 {
-        let (a, b) = split(r, ratio_now, gap);
+        let (a, b) = split(r, ratio_now, gap, flipped);
         let need_a = along(first.min_size(a, gap, mins));
         let need_b = along(second.min_size(b, gap, mins));
         let first_len = if need_a + need_b > usable {
@@ -163,13 +179,14 @@ impl Node {
             Node::Leaf(h) => mins.get(h).copied().unwrap_or(FLOOR),
             Node::Split {
                 ratio,
+                flipped,
                 first,
                 second,
             } => {
-                let (a, b) = split(r, *ratio, gap);
+                let (a, b) = split(r, *ratio, gap, *flipped);
                 let (aw, ah) = first.min_size(a, gap, mins);
                 let (bw, bh) = second.min_size(b, gap, mins);
-                if r.w >= r.h {
+                if side_by_side(r, *flipped) {
                     (aw + gap + bw, ah.max(bh))
                 } else {
                     (aw.max(bw), ah + gap + bh)
@@ -187,6 +204,7 @@ impl Node {
                 ratio,
                 first,
                 second,
+                ..
             } => {
                 if first.contains(h) {
                     let mut v = first.ancestors(h);
@@ -206,20 +224,51 @@ impl Node {
     fn reset(&mut self) {
         if let Node::Split {
             ratio,
+            flipped,
             first,
             second,
         } = self
         {
             *ratio = DEFAULT_RATIO;
+            *flipped = false;
             first.reset();
             second.reset();
         }
     }
+
+    /// The `flipped` flag of the split right above leaf `h`.
+    fn parent_flip(&mut self, h: WindowHandle) -> Option<&mut bool> {
+        let Node::Split {
+            flipped,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if matches!(**first, Node::Leaf(x) if x == h) || matches!(**second, Node::Leaf(x) if x == h)
+        {
+            return Some(flipped);
+        }
+        if first.contains(h) {
+            first.parent_flip(h)
+        } else {
+            second.parent_flip(h)
+        }
+    }
 }
 
-/// Splits `r` at `ratio` along its longer side with `gap` between the halves.
-fn split(r: Rect, ratio: f32, gap: i32) -> (Rect, Rect) {
-    if r.w >= r.h {
+/// Whether a split of `r` puts its halves side by side: along the longer
+/// side, or the shorter one when `flipped`.
+fn side_by_side(r: Rect, flipped: bool) -> bool {
+    (r.w >= r.h) != flipped
+}
+
+/// Splits `r` at `ratio` with `gap` between the halves: along its longer
+/// side, or its shorter one when `flipped`.
+fn split(r: Rect, ratio: f32, gap: i32, flipped: bool) -> (Rect, Rect) {
+    if side_by_side(r, flipped) {
         let usable = (r.w - gap).max(0);
         let first = (usable as f32 * ratio).round() as i32;
         (
@@ -278,6 +327,15 @@ impl Tree {
 
     pub fn remove(&mut self, h: WindowHandle) {
         self.root = self.root.take().and_then(|n| n.without(h));
+    }
+
+    /// Puts `new` where `old` is (for stacks, whose shown member changes).
+    pub fn replace(&mut self, old: WindowHandle, new: WindowHandle) {
+        if old != new && !self.contains(new) {
+            if let Some(root) = &mut self.root {
+                root.rename(old, new);
+            }
+        }
     }
 
     /// Exchanges the places of two windows.
@@ -407,7 +465,19 @@ impl Tree {
         changed
     }
 
-    /// Puts every split back to half and half.
+    /// Turns the split holding `h` between side by side and stacked
+    /// (Hyprland's `togglesplit`). Returns whether `h` has a split.
+    pub fn toggle_split(&mut self, h: WindowHandle) -> bool {
+        match self.root.as_mut().and_then(|r| r.parent_flip(h)) {
+            Some(f) => {
+                *f = !*f;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Puts every split back to half and half, along the longer side.
     pub fn reset(&mut self) {
         if let Some(root) = &mut self.root {
             root.reset();

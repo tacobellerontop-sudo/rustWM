@@ -12,7 +12,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput}
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, GetShellWindow, IsIconic, IsZoomed, PostMessageW, SW_HIDE,
     SW_RESTORE, SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, ShowWindowAsync, WM_CLOSE,
+    SetCursorPos, SetForegroundWindow, SetWindowPos, ShowWindowAsync, WM_CLOSE,
 };
 
 use crate::{hidden, monitor, window};
@@ -260,6 +260,18 @@ impl Platform for Win32Platform {
 
     fn set_border(&mut self, border: Option<rwm_core::Border>) {
         crate::border::update(border);
+    }
+
+    fn set_cursor_pos(&mut self, x: i32, y: i32) -> Result<()> {
+        // SAFETY: plain coordinates; the process is per-monitor DPI aware, so
+        // they are physical pixels like everything else.
+        unsafe { SetCursorPos(x, y) }.map_err(|e| PlatformError::Os(e.to_string()))
+    }
+
+    fn set_opacity(&mut self, handle: WindowHandle, alpha: u8) -> Result<()> {
+        self.checked(handle)?;
+        crate::opacity::set(handle, alpha);
+        Ok(())
     }
 
     fn spawn(&mut self, command_line: &str) -> Result<()> {

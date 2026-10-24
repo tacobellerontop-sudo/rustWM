@@ -89,4 +89,14 @@ pub trait Platform {
 
     /// Draws the focus border, or hides it with `None`.
     fn set_border(&mut self, border: Option<Border>);
+
+    /// Moves the mouse cursor (physical pixels), for `mouse_follows_focus`.
+    fn set_cursor_pos(&mut self, _x: i32, _y: i32) -> Result<()> {
+        Ok(())
+    }
+
+    /// Makes a window translucent: 255 is opaque (and undoes any change).
+    fn set_opacity(&mut self, _handle: WindowHandle, _alpha: u8) -> Result<()> {
+        Ok(())
+    }
 }

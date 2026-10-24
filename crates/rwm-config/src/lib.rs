@@ -3,13 +3,13 @@
 
 pub mod keys;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use rwm_core::Command;
 use rwm_core::layout::{Gaps, LayoutKind};
 use rwm_core::rules::{Rule, RuleAction};
-use rwm_core::wm::{BorderSettings, DEFAULT_MODE, Settings};
+use rwm_core::wm::{BorderSettings, DEFAULT_MODE, Settings, WorkspaceOverride};
 use rwm_core::workspace::{InsertPos, WorkspaceMode};
 use serde::Deserialize;
 
@@ -28,6 +28,8 @@ pub struct Config {
     pub general: General,
     pub gaps: GapsConfig,
     pub border: BorderConfig,
+    /// Per-workspace overrides: `[workspace.<name>]`.
+    pub workspace: BTreeMap<String, WorkspaceConfig>,
     pub bindings: BTreeMap<String, String>,
     /// Extra binding modes: mode name -> chord -> command.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
@@ -42,9 +44,15 @@ pub struct General {
     pub workspaces: Vec<String>,
     pub workspace_mode: WorkspaceMode,
     pub focus_follows_mouse: bool,
+    pub mouse_follows_focus: bool,
+    pub workspace_back_and_forth: bool,
+    /// Layouts `cycle-layout` goes through.
+    pub layout_cycle: Vec<LayoutKind>,
+    pub inactive_opacity: f32,
     /// Command line launched by the `terminal` command. `None` falls back to
     /// `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
+    pub exec_on_start: Vec<String>,
 }
 
 impl Default for General {
@@ -56,9 +64,23 @@ impl Default for General {
             workspaces: s.workspaces,
             workspace_mode: s.workspace_mode,
             focus_follows_mouse: s.focus_follows_mouse,
+            mouse_follows_focus: s.mouse_follows_focus,
+            workspace_back_and_forth: s.workspace_back_and_forth,
+            layout_cycle: s.layout_cycle,
+            inactive_opacity: s.inactive_opacity,
             terminal: None,
+            exec_on_start: Vec::new(),
         }
     }
+}
+
+/// `[workspace.<name>]`: settings for one workspace.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    pub layout: Option<LayoutKind>,
+    pub gaps_inner: Option<i32>,
+    pub gaps_outer: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -259,6 +281,46 @@ impl Config {
         if self.gaps.inner < 0 || self.gaps.outer < 0 {
             errors.push("gaps: inner and outer must not be negative".into());
         }
+        if self.general.layout_cycle.is_empty() {
+            errors.push("general.layout_cycle: needs at least one layout".into());
+        }
+        let opacity = self.general.inactive_opacity;
+        if !(0.1..=1.0).contains(&opacity) {
+            errors.push(format!(
+                "general.inactive_opacity: must be 0.1 to 1.0, got {opacity}"
+            ));
+        }
+        if self
+            .general
+            .exec_on_start
+            .iter()
+            .any(|c| c.trim().is_empty())
+        {
+            errors.push("general.exec_on_start: entries must not be empty".into());
+        }
+        let mut workspace_overrides = HashMap::new();
+        for (name, w) in &self.workspace {
+            if !self.general.workspaces.contains(name) {
+                errors.push(format!(
+                    "workspace.{name}: no workspace called `{name}` in general.workspaces"
+                ));
+            }
+            if w.gaps_inner.is_some_and(|g| g < 0) || w.gaps_outer.is_some_and(|g| g < 0) {
+                errors.push(format!("workspace.{name}: gaps must not be negative"));
+            }
+            let gaps = (w.gaps_inner.is_some() || w.gaps_outer.is_some()).then(|| Gaps {
+                inner: w.gaps_inner.unwrap_or(self.gaps.inner),
+                outer: w.gaps_outer.unwrap_or(self.gaps.outer),
+                smart: self.gaps.smart,
+            });
+            workspace_overrides.insert(
+                name.clone(),
+                WorkspaceOverride {
+                    layout: w.layout,
+                    gaps,
+                },
+            );
+        }
         if !(0..=50).contains(&self.border.width) {
             errors.push(format!(
                 "border.width: must be 0 to 50, got {}",
@@ -351,6 +413,17 @@ impl Config {
                 workspaces: self.general.workspaces,
                 workspace_mode: self.general.workspace_mode,
                 focus_follows_mouse: self.general.focus_follows_mouse,
+                mouse_follows_focus: self.general.mouse_follows_focus,
+                workspace_back_and_forth: self.general.workspace_back_and_forth,
+                layout_cycle: self.general.layout_cycle,
+                inactive_opacity: opacity,
+                exec_on_start: self
+                    .general
+                    .exec_on_start
+                    .iter()
+                    .map(|c| c.trim().to_string())
+                    .collect(),
+                workspace_overrides,
                 border: BorderSettings {
                     enabled: self.border.enabled,
                     width: self.border.width,
@@ -566,6 +639,59 @@ mod tests {
         assert!(errors.contains("no [modes.nowhere]"), "{errors}");
         assert!(errors.contains("modes.trap: needs a binding"), "{errors}");
         assert!(errors.contains("default mode is [bindings]"), "{errors}");
+    }
+
+    #[test]
+    fn komorebi_and_hyprland_style_settings() {
+        let loaded = parse(
+            r#"
+            [general]
+            workspaces = ["web", "code"]
+            mouse_follows_focus = true
+            workspace_back_and_forth = true
+            layout_cycle = ["dwindle", "center", "grid"]
+            inactive_opacity = 0.85
+            exec_on_start = ["yasb.exe"]
+
+            [workspace.code]
+            layout = "columns"
+            gaps_inner = 0
+
+            [[rules]]
+            match = { exe = "mpv.exe" }
+            actions = ["pin", "monitor 2"]
+            "#,
+        )
+        .unwrap();
+        let s = &loaded.settings;
+        assert!(s.mouse_follows_focus && s.workspace_back_and_forth);
+        assert_eq!(
+            s.layout_cycle,
+            vec![LayoutKind::Dwindle, LayoutKind::Center, LayoutKind::Grid]
+        );
+        assert_eq!(s.inactive_opacity, 0.85);
+        assert_eq!(s.exec_on_start, vec!["yasb.exe"]);
+        let code = &s.workspace_overrides["code"];
+        assert_eq!(code.layout, Some(LayoutKind::Columns));
+        assert_eq!(code.gaps.map(|g| (g.inner, g.outer)), Some((0, 8)));
+        assert_eq!(
+            s.rules[0].actions,
+            vec![RuleAction::Pin, RuleAction::Monitor(2)]
+        );
+
+        let errors = invalid(
+            r#"
+            [general]
+            layout_cycle = []
+            inactive_opacity = 0.0
+            [workspace.nope]
+            layout = "grid"
+            "#,
+        )
+        .join("\n");
+        for needle in ["layout_cycle", "inactive_opacity", "workspace.nope"] {
+            assert!(errors.contains(needle), "missing `{needle}` in:\n{errors}");
+        }
     }
 
     #[test]
