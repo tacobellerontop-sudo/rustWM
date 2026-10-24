@@ -31,7 +31,7 @@ pub use events::{EventThread, install_ctrl_handler};
 #[cfg(windows)]
 pub use hidden::restore_hidden_windows;
 #[cfg(windows)]
-pub use hotkeys::HotkeyDaemon;
+pub use hotkeys::{HotkeyDaemon, kerys_running};
 #[cfg(windows)]
 pub use hover::set_focus_follows_mouse;
 #[cfg(windows)]

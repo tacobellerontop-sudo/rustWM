@@ -27,13 +27,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Start rustWM in the background.
+    /// Start rustWM (and with it kerys, the hotkey daemon) in the background.
     Start {
         /// Config file to use instead of the default.
         #[arg(long, short)]
         config: Option<PathBuf>,
     },
-    /// Stop rustWM and restore all windows.
+    /// Stop rustWM and kerys, and restore all windows.
     Stop,
     /// Stop and start rustWM again.
     Restart {
@@ -143,7 +143,39 @@ fn wait_for(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     cond()
 }
 
+/// kerys.exe next to rwm.exe, else on PATH. rustwm.exe looks in the same
+/// places (it sits next to rwm.exe).
+pub(crate) fn kerys_path() -> Option<PathBuf> {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("kerys.exe")));
+    let on_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|dir| dir.join("kerys.exe"));
+    beside.into_iter().chain(on_path).find(|p| p.is_file())
+}
+
+/// Stops rustWM, which also stops the kerys it started, then any kerys that
+/// was started on its own.
 fn stop() -> anyhow::Result<()> {
+    if Client::connect().is_ok() {
+        stop_rustwm()?;
+    } else {
+        println!("rustWM is not running");
+    }
+    if kerys_running() && !wait_for(Duration::from_secs(2), || !kerys_running()) {
+        if let Some(kerys) = kerys_path() {
+            let _ = std::process::Command::new(kerys).arg("stop").status();
+        }
+    }
+    if !kerys_running() {
+        println!("kerys stopped");
+    }
+    Ok(())
+}
+
+fn stop_rustwm() -> anyhow::Result<()> {
     // The daemon may exit before it answers; a closed pipe also means stopped.
     match connect()?.command("quit") {
         Ok(r) => {
@@ -200,12 +232,59 @@ fn start(config: Option<&std::path::Path>) -> anyhow::Result<()> {
     let up = wait_for(Duration::from_secs(5), || {
         Client::connect().is_ok() || matches!(child.try_wait(), Ok(Some(_)))
     });
-    if up && Client::connect().is_ok() {
-        println!("rustWM started (log: {})", log.display());
-        Ok(())
-    } else {
+    if !(up && Client::connect().is_ok()) {
         bail!("rustWM did not start; see {}", log.display())
     }
+    println!("rustWM started (log: {})", log.display());
+    report_kerys(config);
+    Ok(())
+}
+
+/// Says whether rustwm.exe managed to start kerys, and why not if it didn't.
+#[cfg(windows)]
+fn report_kerys(config: Option<&std::path::Path>) {
+    let config = config.map_or_else(rwm_config::default_path, Into::into);
+    let hotkeys = rwm_config::load(&config)
+        .map(|l| l.hotkeys)
+        .unwrap_or_else(|_| Some(rwm_config::DEFAULT_HOTKEYS.into()));
+    match hotkeys.as_deref() {
+        None => println!("no hotkey daemon (hotkeys = \"\" in the config)"),
+        Some(h) if !h.to_ascii_lowercase().contains("kerys") => {
+            println!("hotkeys are handled by {h}")
+        }
+        Some(_) if wait_for(Duration::from_secs(3), kerys_running) => {
+            println!("kerys started: hotkeys are on")
+        }
+        Some(_) if kerys_path().is_none() => println!(
+            "kerys did not start: kerys.exe is missing. Put it next to rwm.exe \
+             (it is in the same zip), then restart."
+        ),
+        Some(_) => println!(
+            "kerys did not start; see {}",
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
+                .join("kerys")
+                .join("kerys.log")
+                .display()
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn kerys_running() -> bool {
+    rwm_win32::kerys_running()
+}
+
+/// Starts kerys by itself, for when rustWM runs without it.
+#[cfg(windows)]
+fn start_kerys() -> anyhow::Result<()> {
+    let Some(kerys) = kerys_path() else {
+        bail!("kerys.exe is missing; put it next to rwm.exe");
+    };
+    let status = std::process::Command::new(kerys).arg("start").status()?;
+    if !status.success() {
+        bail!("kerys did not start ({status})");
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -234,6 +313,16 @@ fn autostart(state: &str) -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn kerys_running() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn start_kerys() -> anyhow::Result<()> {
+    bail!("kerys only runs on Windows")
 }
 
 #[cfg(not(windows))]

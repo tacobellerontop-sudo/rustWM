@@ -108,3 +108,13 @@ impl Drop for HotkeyDaemon {
         let _ = unsafe { CloseHandle(self.job) };
     }
 }
+
+/// Whether a kerys is running: it keeps a message-only window of class
+/// `kerys` for `kerys stop`, whoever started it.
+pub fn kerys_running() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, HWND_MESSAGE};
+    use windows::core::w;
+    // SAFETY: looking up a window by its static class name.
+    unsafe { FindWindowExW(Some(HWND_MESSAGE), None, w!("kerys"), None) }
+        .is_ok_and(|h| !h.is_invalid())
+}

@@ -13,8 +13,9 @@ pub fn run() -> anyhow::Result<()> {
     loop {
         clear_screen();
         let running = Client::connect().is_ok();
-        print_header(running, &config);
-        let items = items(running);
+        let kerys = super::kerys_running();
+        print_header(running, kerys, &config);
+        let items = items(running, kerys);
         for (i, item) in items.iter().enumerate() {
             println!("  {}  {}", i + 1, item.label());
         }
@@ -56,6 +57,7 @@ pub fn run() -> anyhow::Result<()> {
 #[derive(Debug, Clone, Copy)]
 enum Item {
     Start,
+    StartKerys,
     Stop,
     Restart,
     EditConfig,
@@ -68,12 +70,15 @@ enum Item {
     OpenLog,
 }
 
-fn items(running: bool) -> Vec<Item> {
+fn items(running: bool, kerys: bool) -> Vec<Item> {
     let mut items = if running {
         vec![Item::Stop, Item::Restart]
     } else {
         vec![Item::Start]
     };
+    if running && !kerys {
+        items.insert(0, Item::StartKerys);
+    }
     items.extend([
         Item::EditConfig,
         Item::CheckConfig,
@@ -91,9 +96,10 @@ fn items(running: bool) -> Vec<Item> {
 impl Item {
     fn label(self) -> &'static str {
         match self {
-            Item::Start => "Start rustWM",
-            Item::Stop => "Stop rustWM (all windows come back)",
-            Item::Restart => "Restart rustWM",
+            Item::Start => "Start rustWM + kerys",
+            Item::StartKerys => "Start kerys (hotkeys are off)",
+            Item::Stop => "Stop rustWM + kerys (all windows come back)",
+            Item::Restart => "Restart rustWM + kerys",
             Item::EditConfig => "Edit config (changes apply when you save)",
             Item::CheckConfig => "Check config for errors",
             Item::EditKeys => "Edit keybindings (settings window)",
@@ -109,6 +115,7 @@ impl Item {
     fn run(self, config: &Path) -> anyhow::Result<()> {
         match self {
             Item::Start => super::start(None),
+            Item::StartKerys => super::start_kerys(),
             Item::Stop => super::stop(),
             Item::Restart => {
                 super::stop()?;
@@ -128,7 +135,10 @@ impl Item {
                 Ok(())
             }
             Item::EditKeys => {
-                std::process::Command::new(kerys_path())
+                let kerys = super::kerys_path().ok_or_else(|| {
+                    anyhow::anyhow!("kerys.exe is missing; put it next to rwm.exe")
+                })?;
+                std::process::Command::new(kerys)
                     .arg("gui")
                     .spawn()
                     .map_err(|e| {
@@ -138,9 +148,10 @@ impl Item {
                 Ok(())
             }
             Item::Keybindings => {
-                let status = std::process::Command::new(kerys_path())
-                    .arg("bindings")
-                    .status();
+                let kerys = super::kerys_path().ok_or_else(|| {
+                    anyhow::anyhow!("kerys.exe is missing; put it next to rwm.exe")
+                })?;
+                let status = std::process::Command::new(kerys).arg("bindings").status();
                 match status {
                     Ok(s) if s.success() => Ok(()),
                     Ok(s) => anyhow::bail!("kerys bindings failed ({s})"),
@@ -163,7 +174,7 @@ impl Item {
     }
 }
 
-fn print_header(running: bool, config: &Path) {
+fn print_header(running: bool, kerys: bool, config: &Path) {
     println!();
     println!("  rustWM {}", env!("CARGO_PKG_VERSION"));
     println!("  ----------------------------------------------");
@@ -176,6 +187,16 @@ fn print_header(running: bool, config: &Path) {
         "not running".into()
     };
     println!("  Status:     {status}");
+    let hotkeys = if kerys {
+        "on (kerys running)"
+    } else if super::kerys_path().is_none() {
+        "off: kerys.exe is missing, put it next to rwm.exe"
+    } else if running {
+        "off: kerys is not running"
+    } else {
+        "off (kerys starts with rustWM)"
+    };
+    println!("  Hotkeys:    {hotkeys}");
     println!("  Config:     {}", config.display());
     if let Some(on) = autostart_on() {
         println!("  Autostart:  {}", if on { "on" } else { "off" });
@@ -209,15 +230,6 @@ fn summary() -> Option<String> {
         plural(monitors.len(), "monitor"),
         plural(windows, "window")
     ))
-}
-
-/// kerys.exe next to rwm.exe, or else whatever is on PATH.
-fn kerys_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.join("kerys.exe")))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("kerys"))
 }
 
 #[cfg(windows)]
