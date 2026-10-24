@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 use crate::command::{Axis, Command, DEFAULT_PIXEL_STEP, SPECIAL_PREFIX, Target};
 use crate::geometry::Direction;
 use crate::layout::{self, Gaps, LayoutKind};
+use crate::platform::{HideMethod, PlatformOptions};
 use crate::rules::{self, Rule, Verdict};
 use crate::state::{MonitorState, State, WindowState, WorkspaceState};
 use crate::tree::Mins;
@@ -69,6 +70,10 @@ pub struct Settings {
     pub layout_cycle: Vec<LayoutKind>,
     /// Opacity of windows without focus, 0.1 to 1.0 (1.0 leaves them alone).
     pub inactive_opacity: f32,
+    /// How windows of inactive workspaces are hidden.
+    pub hide_method: HideMethod,
+    /// How long window moves are animated, in milliseconds; 0 is off.
+    pub animation_ms: u32,
     pub border: BorderSettings,
     /// Command line for the `terminal` command; `None` tries `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
@@ -92,6 +97,8 @@ impl Default for Settings {
             workspace_back_and_forth: false,
             layout_cycle: LayoutKind::DEFAULT_CYCLE.to_vec(),
             inactive_opacity: 1.0,
+            hide_method: HideMethod::default(),
+            animation_ms: DEFAULT_ANIMATION_MS,
             border: BorderSettings::default(),
             terminal: None,
             exec_on_start: Vec::new(),
@@ -105,6 +112,9 @@ const FALLBACK_TERMINALS: &[&str] = &["wt.exe", "cmd.exe"];
 
 /// A shown special workspace covers this fraction of the work area.
 const SPECIAL_SCALE: f32 = 0.9;
+
+/// Default length of window move animations.
+pub const DEFAULT_ANIMATION_MS: u32 = 200;
 
 /// How many previously focused windows `focus last` remembers.
 const FOCUS_HISTORY: usize = 32;
@@ -193,7 +203,8 @@ impl<P: Platform> Wm<P> {
         Self::with_settings(platform, Settings::default())
     }
 
-    pub fn with_settings(platform: P, settings: Settings) -> Self {
+    pub fn with_settings(mut platform: P, settings: Settings) -> Self {
+        platform.configure(platform_options(&settings));
         Self {
             platform,
             settings,
@@ -304,6 +315,7 @@ impl<P: Platform> Wm<P> {
     pub fn set_settings(&mut self, settings: Settings) {
         let layout = settings.default_layout;
         let names = settings.workspaces.clone();
+        self.platform.configure(platform_options(&settings));
         self.settings = settings;
         for mi in 0..self.monitors.len() {
             self.resize_workspaces(mi, &names, layout);
@@ -364,7 +376,10 @@ impl<P: Platform> Wm<P> {
             }
             Event::WindowMinimized(h) => self.unmanage(h),
             Event::WindowFocused(h) => {
-                if self.locate(h).is_some() {
+                if let Some(loc) = self.locate(h) {
+                    if self.bring_into_view(h, loc) {
+                        self.apply();
+                    }
                     self.set_focus_state(h);
                 } else if std::mem::take(&mut self.desktop_focus_pending) {
                     // We focused the desktop ourselves; the monitor stays.
@@ -1291,6 +1306,15 @@ impl<P: Platform> Wm<P> {
         }
         self.align_workspaces();
         self.applied.clear();
+        // Windows may pull off-screen windows back onto a monitor when the
+        // displays change: put them out of sight again.
+        if self.settings.hide_method == HideMethod::Offscreen {
+            for h in self.hidden_by_us.clone() {
+                if let Err(e) = self.platform.hide(h) {
+                    debug!(handle = ?h, error = %e, "could not re-hide window");
+                }
+            }
+        }
     }
 
     /// In global mode, puts every monitor on the focused monitor's workspace.
@@ -1718,6 +1742,40 @@ impl<P: Platform> Wm<P> {
         warn!("no terminal could be started; set `terminal` in the config");
     }
 
+    /// A window we keep out of view got the foreground on its own: the user
+    /// clicked its taskbar button or Alt+Tabbed to it. Show it by switching
+    /// to its workspace (or bringing it to the front of its stack). Returns
+    /// whether anything changed. Stale focus events for windows we hid since
+    /// are ignored: the window must still be the foreground one.
+    fn bring_into_view(&mut self, h: WindowHandle, loc: Loc) -> bool {
+        if self.platform.foreground() != Some(h) {
+            return false;
+        }
+        let mut changed = false;
+        if !self.is_visible(loc) {
+            match loc {
+                Loc::Ws { monitor, workspace } => {
+                    self.ws_mut(loc).focused = Some(h);
+                    self.switch_to(monitor, workspace);
+                }
+                Loc::Special(i) => {
+                    let name = self.specials[i].name.clone();
+                    self.toggle_special(&name);
+                }
+            }
+            changed = true;
+        }
+        let ws = self.ws_mut(loc);
+        if ws.stack_of(h).is_some() && !ws.tiled.contains(&h) {
+            ws.bring_to_front(h);
+            changed = true;
+        }
+        if changed {
+            info!(handle = ?h, "window activated from outside, showing it");
+        }
+        changed
+    }
+
     /// `focus last`: the window focused before this one, switching to its
     /// workspace if it isn't shown.
     fn focus_last(&mut self) {
@@ -2075,7 +2133,10 @@ impl<P: Platform> Wm<P> {
         self.hidden_by_us.insert(handle);
         match self.platform.hide(handle) {
             Ok(()) => {
-                self.hide_events_pending.insert(handle);
+                // Only a real hide reports back with an event.
+                if self.settings.hide_method == HideMethod::Hide {
+                    self.hide_events_pending.insert(handle);
+                }
             }
             Err(e) => {
                 warn!(?handle, error = %e, "hide failed");
@@ -2104,6 +2165,13 @@ impl<P: Platform> Wm<P> {
                 warn!(?handle, error = %e, "restore failed");
             }
         }
+    }
+}
+
+fn platform_options(s: &Settings) -> PlatformOptions {
+    PlatformOptions {
+        hide_method: s.hide_method,
+        animation_ms: s.animation_ms,
     }
 }
 

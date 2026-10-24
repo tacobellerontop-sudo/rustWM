@@ -223,6 +223,20 @@ impl Workspace {
         Some(next)
     }
 
+    /// Shows hidden stack member `h` in its stack's tile.
+    pub fn bring_to_front(&mut self, h: WindowHandle) {
+        let Some(si) = self.stack_of(h) else {
+            return;
+        };
+        if let Some(front) = self.stacks[si]
+            .iter()
+            .copied()
+            .find(|x| self.tiled.contains(x))
+        {
+            self.replace_tiled(front, h);
+        }
+    }
+
     /// Takes shown member `h` out of its stack into a tile of its own next
     /// to it. Returns whether it did.
     pub fn unstack(&mut self, h: WindowHandle) -> bool {

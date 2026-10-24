@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use rwm_core::layout::{Gaps, LayoutKind};
+use rwm_core::platform::HideMethod;
 use rwm_core::rules::{Rule, RuleAction};
 use rwm_core::wm::{BorderSettings, Settings, WorkspaceOverride};
 use rwm_core::workspace::{InsertPos, WorkspaceMode};
@@ -24,6 +25,7 @@ pub struct Config {
     pub general: General,
     pub gaps: GapsConfig,
     pub border: BorderConfig,
+    pub animation: AnimationConfig,
     /// Per-workspace overrides: `[workspace.<name>]`.
     pub workspace: BTreeMap<String, WorkspaceConfig>,
     pub rules: Vec<RuleConfig>,
@@ -46,6 +48,7 @@ pub struct General {
     /// Layouts `cycle-layout` goes through.
     pub layout_cycle: Vec<LayoutKind>,
     pub inactive_opacity: f32,
+    pub hide_method: HideMethod,
     /// Command line launched by the `terminal` command. `None` falls back to
     /// `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
@@ -68,9 +71,27 @@ impl Default for General {
             workspace_back_and_forth: s.workspace_back_and_forth,
             layout_cycle: s.layout_cycle,
             inactive_opacity: s.inactive_opacity,
+            hide_method: s.hide_method,
             terminal: None,
             hotkeys: DEFAULT_HOTKEYS.into(),
             exec_on_start: Vec::new(),
+        }
+    }
+}
+
+/// `[animation]`: sliding windows to their new place.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnimationConfig {
+    pub enabled: bool,
+    pub duration_ms: u32,
+}
+
+impl Default for AnimationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            duration_ms: rwm_core::wm::DEFAULT_ANIMATION_MS,
         }
     }
 }
@@ -242,6 +263,12 @@ impl Config {
         if self.gaps.inner < 0 || self.gaps.outer < 0 {
             errors.push("gaps: inner and outer must not be negative".into());
         }
+        if self.animation.duration_ms > 1000 {
+            errors.push(format!(
+                "animation.duration_ms: must be 0 to 1000, got {}",
+                self.animation.duration_ms
+            ));
+        }
         if self.general.layout_cycle.is_empty() {
             errors.push("general.layout_cycle: needs at least one layout".into());
         }
@@ -344,6 +371,12 @@ impl Config {
                 workspace_back_and_forth: self.general.workspace_back_and_forth,
                 layout_cycle: self.general.layout_cycle,
                 inactive_opacity: opacity,
+                hide_method: self.general.hide_method,
+                animation_ms: if self.animation.enabled {
+                    self.animation.duration_ms
+                } else {
+                    0
+                },
                 exec_on_start: self
                     .general
                     .exec_on_start
@@ -566,6 +599,22 @@ mod tests {
         for needle in ["layout_cycle", "inactive_opacity", "workspace.nope"] {
             assert!(errors.contains(needle), "missing `{needle}` in:\n{errors}");
         }
+    }
+
+    #[test]
+    fn animation_and_hiding() {
+        let s = parse("").unwrap().settings;
+        assert_eq!(s.hide_method, HideMethod::Offscreen);
+        assert_eq!(s.animation_ms, rwm_core::wm::DEFAULT_ANIMATION_MS);
+        let s = parse(
+            "[general]\nhide_method = \"hide\"\n[animation]\nenabled = false\nduration_ms = 300",
+        )
+        .unwrap()
+        .settings;
+        assert_eq!(s.hide_method, HideMethod::Hide);
+        assert_eq!(s.animation_ms, 0);
+        assert!(parse("[animation]\nduration_ms = 5000").is_err());
+        assert!(parse("[general]\nhide_method = \"vanish\"").is_err());
     }
 
     #[test]

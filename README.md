@@ -83,6 +83,12 @@ terminal = "wezterm-gui.exe"     # Win+Enter; defaults to wt.exe, then cmd.exe
 hotkeys = "kerys.exe"            # hotkey daemon to start; "" for none
 exec_on_start = ["yasb.exe"]     # run once when rustWM starts
 
+hide_method = "offscreen"        # offscreen: keep taskbar buttons | hide
+
+[animation]
+enabled = true
+duration_ms = 200
+
 [workspace.9]                    # per-workspace layout and gaps
 layout = "monocle"
 gaps_inner = 0
@@ -179,6 +185,8 @@ freely.
   between are picked up then. `unmanage` lets go of one window, `manage` forces rustWM
   to take one it skipped.
 - **Translucent unfocused windows** (`inactive_opacity`) and **mouse follows focus**.
+- **Animations**: windows slide to their new place (ease-out, 200 ms by default; the
+  focus border slides along). `[animation] enabled = false` or `duration_ms` to tune.
 
 ### Default keys
 
@@ -253,7 +261,11 @@ rwm restore                                    # works even if rustWM crashed
   for focus, set the `DisableLockWorkstation` registry value
   (`HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System`), or use Win + Right.
 - Windows of elevated (admin) apps cannot be moved by a non-elevated rustWM.
-- Windows on inactive workspaces are hidden, so they leave the taskbar until you switch back.
+- Windows of inactive workspaces are moved just past the edge of your monitors
+  (`hide_method = "offscreen"`, the default), so they keep their taskbar buttons; clicking
+  one, or Alt+Tabbing to it, switches to its workspace. They still show up in Alt+Tab
+  and taskbar previews. `hide_method = "hide"` hides them instead, which takes them off
+  the taskbar until you switch back.
 
 ## Milestones
 

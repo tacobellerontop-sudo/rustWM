@@ -136,7 +136,10 @@ fn run(args: Args) -> anyhow::Result<()> {
         }
     };
 
-    let verifier = spawn_verifier(tx.clone())?;
+    let animation_ms = Arc::new(std::sync::atomic::AtomicU64::new(
+        loaded.settings.animation_ms.into(),
+    ));
+    let verifier = spawn_verifier(tx.clone(), animation_ms.clone())?;
     let shared = Arc::new(ipc::Shared::new(tx));
     shared.set_config(&config_path);
     {
@@ -175,6 +178,10 @@ fn run(args: Args) -> anyhow::Result<()> {
                 Ok(loaded) => {
                     shared.set_config(&config_path);
                     rwm_win32::set_focus_follows_mouse(loaded.settings.focus_follows_mouse);
+                    animation_ms.store(
+                        loaded.settings.animation_ms.into(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     wm.set_settings(loaded.settings);
                     tracing::info!("config reloaded");
                 }
@@ -196,7 +203,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         }
     }
     wm.restore();
-    rwm_win32::flush_opacity();
+    rwm_win32::flush();
     drop(hotkeys);
     events.stop();
     tracing::info!("rustWM stopped");
@@ -209,19 +216,23 @@ fn run(args: Args) -> anyhow::Result<()> {
 #[cfg(windows)]
 fn spawn_verifier(
     events: std::sync::mpsc::Sender<rwm_core::Event>,
+    animation_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> std::io::Result<std::sync::mpsc::Sender<()>> {
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc::{RecvTimeoutError, channel};
     use std::time::Duration;
 
-    /// Windows resize asynchronously; give them this long to settle.
-    const SETTLE: Duration = Duration::from_millis(300);
+    /// Windows resize asynchronously; give them this long to settle once
+    /// any animation is over.
+    const SETTLE_MS: u64 = 300;
     let (kick, kicks) = channel::<()>();
     std::thread::Builder::new()
         .name("verify".into())
         .spawn(move || {
             while kicks.recv().is_ok() {
                 loop {
-                    match kicks.recv_timeout(SETTLE) {
+                    let settle = SETTLE_MS + animation_ms.load(Ordering::Relaxed);
+                    match kicks.recv_timeout(Duration::from_millis(settle)) {
                         Ok(()) => continue,
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => return,

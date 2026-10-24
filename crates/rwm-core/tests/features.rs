@@ -4,6 +4,7 @@
 
 use rwm_core::fake::{Call, FakePlatform};
 use rwm_core::layout::{Gaps, LayoutKind};
+use rwm_core::platform::HideMethod;
 use rwm_core::rules::{Rule, RuleAction};
 use rwm_core::wm::{Settings, WorkspaceOverride};
 use rwm_core::{Event, Rect, WindowHandle, Wm};
@@ -82,7 +83,9 @@ fn stack_puts_two_windows_in_one_tile() {
 
 #[test]
 fn a_late_hide_event_after_cycling_back_is_not_a_close() {
-    let mut wm = wm_with(2);
+    let mut s = no_gaps();
+    s.hide_method = HideMethod::Hide;
+    let mut wm = wm_on(FakePlatform::single_monitor(), 2, s);
     cmd(&mut wm, "stack right");
     cmd(&mut wm, "cycle-stack next");
     // The event for hiding 2 (from `stack`) only arrives now, after 2 was
@@ -431,4 +434,72 @@ fn exec_on_start_runs_once() {
             .calls
             .contains(&Call::Spawn("yasb.exe".into()))
     );
+}
+
+// ---- off-screen hiding --------------------------------------------------------
+
+#[test]
+fn settings_reach_the_platform() {
+    let mut s = no_gaps();
+    s.animation_ms = 150;
+    let wm = wm_on(FakePlatform::single_monitor(), 0, s);
+    let o = wm.platform().options.unwrap();
+    assert_eq!(
+        (o.hide_method, o.animation_ms),
+        (HideMethod::Offscreen, 150)
+    );
+}
+
+#[test]
+fn clicking_a_hidden_window_on_the_taskbar_switches_to_it() {
+    let mut wm = wm_with(2);
+    cmd(&mut wm, "focus right");
+    cmd(&mut wm, "move-to-workspace 3");
+    assert!(hidden(&wm, 2));
+    // The user clicks window 2's taskbar button: Windows activates it.
+    wm.platform_mut().foreground = Some(W(2));
+    wm.handle(Event::WindowFocused(W(2)));
+    assert_eq!(wm.snapshot().monitors[0].active_workspace, "3");
+    assert!(!hidden(&wm, 2) && hidden(&wm, 1));
+    assert_eq!(wm.focused(), Some(W(2)));
+}
+
+#[test]
+fn a_stale_focus_event_does_not_switch_back() {
+    let mut wm = wm_with(2);
+    cmd(&mut wm, "focus right");
+    cmd(&mut wm, "move-to-workspace 3");
+    // A focus event for 2 from before it moved arrives late; 1 has the
+    // foreground by now.
+    assert_eq!(wm.platform().foreground, Some(W(1)));
+    wm.handle(Event::WindowFocused(W(2)));
+    assert_eq!(wm.snapshot().monitors[0].active_workspace, "1");
+}
+
+#[test]
+fn activating_a_hidden_stack_window_brings_it_to_the_front() {
+    let mut wm = wm_with(2);
+    cmd(&mut wm, "stack right");
+    assert!(hidden(&wm, 2));
+    wm.platform_mut().foreground = Some(W(2));
+    wm.handle(Event::WindowFocused(W(2)));
+    assert!(!hidden(&wm, 2) && hidden(&wm, 1));
+    assert_eq!(wm.focused(), Some(W(2)));
+}
+
+#[test]
+fn display_changes_hide_off_screen_windows_again() {
+    let mut wm = wm_with(2);
+    cmd(&mut wm, "focus right");
+    cmd(&mut wm, "move-to-workspace 3");
+    let hides = |wm: &Wm<FakePlatform>| {
+        wm.platform()
+            .calls
+            .iter()
+            .filter(|c| **c == Call::Hide(W(2)))
+            .count()
+    };
+    assert_eq!(hides(&wm), 1);
+    wm.handle(Event::DisplayChanged);
+    assert_eq!(hides(&wm), 2);
 }
