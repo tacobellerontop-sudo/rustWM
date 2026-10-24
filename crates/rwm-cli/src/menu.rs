@@ -40,7 +40,15 @@ pub fn run() -> anyhow::Result<()> {
             continue;
         };
         println!();
-        if let Err(e) = item.run(&config) {
+        let result = match item {
+            // The Settings screen has its own loop and returns here.
+            Item::Settings => match crate::settings::run(&config, &mut stdin) {
+                Ok(()) => continue,
+                Err(e) => Err(e),
+            },
+            _ => item.run(&config),
+        };
+        if let Err(e) = result {
             println!("  Error: {e:#}");
         }
         println!();
@@ -58,6 +66,7 @@ enum Item {
     Start,
     Stop,
     Restart,
+    Settings,
     EditConfig,
     CheckConfig,
     Keybindings,
@@ -73,7 +82,12 @@ fn items(running: bool) -> Vec<Item> {
     } else {
         vec![Item::Start]
     };
-    items.extend([Item::EditConfig, Item::CheckConfig, Item::Keybindings]);
+    items.extend([
+        Item::Settings,
+        Item::EditConfig,
+        Item::CheckConfig,
+        Item::Keybindings,
+    ]);
     items.push(Item::Autostart(!autostart_on().unwrap_or(false)));
     if in_path() == Some(false) {
         items.push(Item::AddToPath);
@@ -88,7 +102,8 @@ impl Item {
             Item::Start => "Start rustWM",
             Item::Stop => "Stop rustWM (all windows come back)",
             Item::Restart => "Restart rustWM",
-            Item::EditConfig => "Edit config (changes apply when you save)",
+            Item::Settings => "Settings (focus follows mouse, border, gaps, ...)",
+            Item::EditConfig => "Edit config file (changes apply when you save)",
             Item::CheckConfig => "Check config for errors",
             Item::Keybindings => "Show keybindings",
             Item::Autostart(true) => "Start rustWM when I log in",
@@ -101,6 +116,8 @@ impl Item {
 
     fn run(self, config: &Path) -> anyhow::Result<()> {
         match self {
+            // Handled by the menu loop, which owns stdin.
+            Item::Settings => Ok(()),
             Item::Start => super::start(None),
             Item::Stop => super::stop(),
             Item::Restart => {
@@ -214,7 +231,7 @@ fn show_bindings(config: &Path) {
 }
 
 #[cfg(windows)]
-fn clear_screen() {
+pub(crate) fn clear_screen() {
     let _ = std::process::Command::new("cmd")
         .args(["/c", "cls"])
         .status();
@@ -261,7 +278,7 @@ fn add_to_path() -> anyhow::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn clear_screen() {}
+pub(crate) fn clear_screen() {}
 
 #[cfg(not(windows))]
 fn open(_path: &Path) -> anyhow::Result<()> {

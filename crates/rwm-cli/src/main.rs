@@ -1,6 +1,7 @@
 //! `rwm`: start, stop and control the rustWM daemon over its named pipe.
 
 mod menu;
+mod settings;
 
 use std::io::{ErrorKind, IsTerminal};
 use std::path::PathBuf;

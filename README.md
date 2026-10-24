@@ -38,6 +38,7 @@ rwm autostart on                   # start at login
 ```
 
 Or just double-click `rwm.exe` (or run it with no arguments) for a menu: start/stop,
+a Settings screen (focus follows mouse, workspace mode, layout, terminal, border, gaps),
 edit and check the config, see your keybindings, autostart, and "Add rwm to PATH" so
 `rwm` works without `.\` in any new terminal.
 
