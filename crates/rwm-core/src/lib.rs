@@ -12,6 +12,7 @@ pub mod layout;
 pub mod platform;
 pub mod rules;
 pub mod state;
+pub mod tree;
 pub mod window;
 pub mod wm;
 pub mod workspace;

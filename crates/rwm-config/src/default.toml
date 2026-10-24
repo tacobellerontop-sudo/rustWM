@@ -10,7 +10,8 @@
 [general]
 # Layout for new workspaces: "dwindle", "master" or "monocle".
 default_layout = "dwindle"
-# Where new windows go: "after-focused", "end" or "start".
+# Where new windows go: "after-focused" splits the focused window in half
+# (like Hyprland), "end" / "start" split the last / first window.
 new_window = "after-focused"
 # Workspace names (1 to 9), created on every monitor.
 workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]

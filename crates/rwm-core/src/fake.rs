@@ -16,6 +16,7 @@ pub enum Call {
     Show(WindowHandle),
     Hide(WindowHandle),
     Focus(WindowHandle),
+    FocusDesktop,
     Close(WindowHandle),
     Spawn(String),
 }
@@ -163,6 +164,12 @@ impl Platform for FakePlatform {
         self.calls.push(Call::Focus(handle));
         self.get_mut(handle)?;
         self.foreground = Some(handle);
+        Ok(())
+    }
+
+    fn focus_desktop(&mut self) -> Result<()> {
+        self.calls.push(Call::FocusDesktop);
+        self.foreground = None;
         Ok(())
     }
 

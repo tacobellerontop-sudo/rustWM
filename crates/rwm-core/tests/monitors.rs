@@ -102,3 +102,49 @@ fn switching_to_global_lines_monitors_up() {
     cmd(&mut wm, "workspace 1");
     assert_eq!(active(&wm), vec!["1", "4"]);
 }
+
+#[test]
+fn switching_to_an_empty_workspace_keeps_focus_on_this_monitor() {
+    use rwm_core::fake::Call;
+    let mut wm = dual(WorkspaceMode::PerMonitor);
+    // The mouse rests on the other monitor; that must not matter.
+    wm.platform_mut().cursor = Some((3000, 500));
+    wm.platform_mut().calls.clear();
+    cmd(&mut wm, "workspace 2");
+    // Focus moves to the desktop before window 1 is hidden, so Windows never
+    // hands focus to window 2 on the other monitor.
+    let calls = &wm.platform().calls;
+    let desktop = calls.iter().position(|c| *c == Call::FocusDesktop).unwrap();
+    let hide = calls.iter().position(|c| *c == Call::Hide(W(1))).unwrap();
+    assert!(desktop < hide, "{calls:?}");
+    // The desktop's own focus event doesn't move the monitor either.
+    wm.platform_mut().add_window(50, "explorer.exe", "");
+    wm.platform_mut()
+        .windows
+        .get_mut(&W(50))
+        .unwrap()
+        .manageable = false;
+    wm.handle(Event::WindowFocused(W(50)));
+    assert_eq!(wm.focused_monitor(), 0);
+    cmd(&mut wm, "workspace 3");
+    assert_eq!(active(&wm), vec!["3", "1"]);
+    cmd(&mut wm, "workspace 1");
+    assert_eq!(wm.focused(), Some(W(1)));
+    assert_eq!(wm.platform().foreground, Some(W(1)));
+}
+
+#[test]
+fn switching_focuses_the_new_window_before_hiding_the_old() {
+    use rwm_core::fake::Call;
+    let mut wm = dual(WorkspaceMode::PerMonitor);
+    cmd(&mut wm, "move-to-workspace 2");
+    wm.platform_mut().add_window(3, "c.exe", "three");
+    wm.handle(Event::WindowShown(W(3)));
+    wm.platform_mut().calls.clear();
+    cmd(&mut wm, "workspace 2");
+    let calls = &wm.platform().calls;
+    let focus = calls.iter().position(|c| *c == Call::Focus(W(1))).unwrap();
+    let hide = calls.iter().position(|c| *c == Call::Hide(W(3))).unwrap();
+    assert!(focus < hide, "{calls:?}");
+    assert_eq!(wm.focused_monitor(), 0);
+}

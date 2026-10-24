@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{LayoutKind, Ratios};
+use crate::tree::Tree;
 use crate::{MonitorInfo, WindowHandle};
 
 /// Where a newly managed window goes in its workspace's list.
@@ -71,6 +72,8 @@ pub struct Workspace {
     pub fullscreen: Option<WindowHandle>,
     pub layout: LayoutKind,
     pub ratios: Ratios,
+    /// How dwindle divides the space; see [`Tree`].
+    pub tree: Tree,
 }
 
 impl Workspace {
@@ -83,6 +86,7 @@ impl Workspace {
             fullscreen: None,
             layout,
             ratios: Ratios::default(),
+            tree: Tree::default(),
         }
     }
 
@@ -117,6 +121,15 @@ impl Workspace {
     }
 
     pub fn insert(&mut self, h: WindowHandle, pos: InsertPos) {
+        // Like Hyprland, the new window takes half of the focused one.
+        match pos {
+            InsertPos::AfterFocused => {
+                let anchor = self.focused.filter(|f| self.tiled.contains(f));
+                self.tree.insert(h, anchor, false);
+            }
+            InsertPos::End => self.tree.insert(h, None, false),
+            InsertPos::Start => self.tree.insert(h, None, true),
+        }
         let at = match pos {
             InsertPos::Start => 0,
             InsertPos::End => self.tiled.len(),
@@ -131,6 +144,7 @@ impl Workspace {
     /// Removes a window. If it was focused, focus moves to the tiled window
     /// that took its place (or the new last one), else to a floating one.
     pub fn remove(&mut self, h: WindowHandle) -> bool {
+        self.tree.remove(h);
         let successor = if let Some(i) = self.index_of(h) {
             self.tiled.remove(i);
             self.tiled
@@ -154,7 +168,14 @@ impl Workspace {
     pub fn swap(&mut self, a: WindowHandle, b: WindowHandle) {
         if let (Some(i), Some(j)) = (self.index_of(a), self.index_of(b)) {
             self.tiled.swap(i, j);
+            self.tree.swap(a, b);
         }
+    }
+
+    /// Stops tiling `h` (e.g. it starts floating) without touching focus.
+    pub fn untile(&mut self, h: WindowHandle) {
+        self.tiled.retain(|x| *x != h);
+        self.tree.remove(h);
     }
 
     /// The window `step` places away from `from` in list order (tiled, then
