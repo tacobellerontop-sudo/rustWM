@@ -68,24 +68,64 @@ fn tile_rule_overrides_detection() {
 }
 
 #[test]
-fn window_that_refuses_its_slot_is_floated() {
+fn window_that_needs_more_room_gets_it() {
     let mut p = two_windows();
-    // Like the Riot Client: has a border but enforces a minimum size.
+    // Like a console with a minimum width: it can't go down to half.
     p.min_size.insert(W(2), (1200, 800));
-    let mut wm = start(p, settings());
+    let wm = start(p, settings());
+    // Known up front, so the split moves at once: no float, no jump.
+    assert!(!floating(&wm, 2));
+    assert_eq!(rect(&wm, 2), Rect::new(720, 0, 1200, 1040));
+    assert_eq!(rect(&wm, 1), Rect::new(0, 0, 720, 1040));
+}
+
+#[test]
+fn refusal_found_later_moves_the_split() {
+    let mut p = two_windows();
+    let mut wm = start(p.clone(), settings());
+    // The window only turns out to be stubborn after it was tiled.
+    wm.platform_mut().min_size.insert(W(2), (1200, 800));
+    p.min_size.clear();
+    wm.handle(Event::Command("retile".into()));
     assert!(wm.take_verify_request());
-    assert!(!wm.take_verify_request());
+    wm.handle(Event::Verify);
+    assert!(!floating(&wm, 2));
+    assert_eq!(rect(&wm, 1), Rect::new(0, 0, 720, 1040));
+    assert_eq!(rect(&wm, 2).w, 1200);
+}
+
+#[test]
+fn window_too_big_for_any_slot_floats_at_once() {
+    let mut p = two_windows();
+    p.min_size.insert(W(2), (1900, 800));
+    let mut wm = start(p, settings());
+    // Adopted at startup: found by the size check.
     wm.handle(Event::Verify);
     assert!(floating(&wm, 2));
     assert_eq!(rect(&wm, 1), Rect::new(0, 0, 1920, 1040));
-    // Keeps its own size, centred.
-    assert_eq!(rect(&wm, 2), Rect::new(360, 0, 1200, 1040));
+
+    // Opened later: floated straight away, centred, with no tiled detour.
+    wm.platform_mut().add_window(3, "pwsh.exe", "console");
+    wm.platform_mut().min_size.insert(W(3), (1800, 900));
+    wm.platform_mut().calls.clear();
+    wm.handle(Event::WindowShown(W(3)));
+    assert!(floating(&wm, 3));
+    assert_eq!(rect(&wm, 3), Rect::new(60, 70, 1800, 900));
+    let moves: Vec<_> = wm
+        .platform()
+        .calls
+        .iter()
+        .filter(
+            |c| matches!(c, rwm_core::fake::Call::SetRects(m) if m.iter().any(|(h, _)| *h == W(3))),
+        )
+        .collect();
+    assert_eq!(moves.len(), 1, "{moves:?}");
 }
 
 #[test]
 fn tiling_a_floated_window_by_hand_sticks() {
     let mut p = two_windows();
-    p.min_size.insert(W(2), (1200, 800));
+    p.min_size.insert(W(2), (1900, 800));
     p.foreground = Some(W(2));
     let mut wm = start(p, settings());
     wm.handle(Event::Verify);
