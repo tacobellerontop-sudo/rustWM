@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::platform::Result;
+use crate::platform::{PlatformOptions, Result};
 use crate::{Border, MonitorInfo, Platform, PlatformError, Rect, WindowHandle, WindowInfo};
 
 /// One call the core made into the platform.
@@ -37,6 +37,10 @@ pub struct FakePlatform {
     pub failing_spawns: Vec<String>,
     /// The focus border as last drawn.
     pub border: Option<Border>,
+    /// Opacity set on windows; missing means opaque.
+    pub opacity: BTreeMap<WindowHandle, u8>,
+    /// Options from the last `configure`.
+    pub options: Option<PlatformOptions>,
 }
 
 impl FakePlatform {
@@ -204,5 +208,24 @@ impl Platform for FakePlatform {
 
     fn set_border(&mut self, border: Option<Border>) {
         self.border = border;
+    }
+
+    fn configure(&mut self, options: PlatformOptions) {
+        self.options = Some(options);
+    }
+
+    fn set_cursor_pos(&mut self, x: i32, y: i32) -> Result<()> {
+        self.cursor = Some((x, y));
+        Ok(())
+    }
+
+    fn set_opacity(&mut self, handle: WindowHandle, alpha: u8) -> Result<()> {
+        self.get_mut(handle)?;
+        if alpha == 255 {
+            self.opacity.remove(&handle);
+        } else {
+            self.opacity.insert(handle, alpha);
+        }
+        Ok(())
     }
 }
