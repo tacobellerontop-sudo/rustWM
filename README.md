@@ -161,7 +161,7 @@ rustWM now ignores. See the kerys README for the format.
 | Win + Space | cycle layout (dwindle → master → monocle) |
 | Win + F / Win + Shift + F | toggle floating / fullscreen |
 | Win + = / Win + - | grow / shrink the focused window |
-| Win + Shift + Q | close window |
+| Win + Q or Win + Shift + Q | close window |
 | Win + Shift + R | reload config |
 | Win + ` / Win + Shift + ` | toggle the scratchpad / send window to it |
 | Win + Alt + R | resize mode: H/J/K/L or arrows, Esc or Enter to leave |
