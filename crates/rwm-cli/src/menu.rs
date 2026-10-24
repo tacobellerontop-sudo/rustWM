@@ -41,7 +41,15 @@ pub fn run() -> anyhow::Result<()> {
             continue;
         };
         println!();
-        if let Err(e) = item.run(&config) {
+        let result = match item {
+            // The Settings screen has its own loop and returns here.
+            Item::Settings => match crate::settings::run(&config, &mut stdin) {
+                Ok(()) => continue,
+                Err(e) => Err(e),
+            },
+            _ => item.run(&config),
+        };
+        if let Err(e) = result {
             println!("  Error: {e:#}");
         }
         println!();
@@ -60,6 +68,7 @@ enum Item {
     StartKerys,
     Stop,
     Restart,
+    Settings,
     EditConfig,
     CheckConfig,
     EditKeys,
@@ -80,6 +89,7 @@ fn items(running: bool, kerys: bool) -> Vec<Item> {
         items.insert(0, Item::StartKerys);
     }
     items.extend([
+        Item::Settings,
         Item::EditConfig,
         Item::CheckConfig,
         Item::EditKeys,
@@ -100,7 +110,8 @@ impl Item {
             Item::StartKerys => "Start kerys (hotkeys are off)",
             Item::Stop => "Stop rustWM + kerys (all windows come back)",
             Item::Restart => "Restart rustWM + kerys",
-            Item::EditConfig => "Edit config (changes apply when you save)",
+            Item::Settings => "Settings (focus follows mouse, border, gaps, ...)",
+            Item::EditConfig => "Edit config file (changes apply when you save)",
             Item::CheckConfig => "Check config for errors",
             Item::EditKeys => "Edit keybindings (settings window)",
             Item::Keybindings => "Show keybindings",
@@ -114,6 +125,8 @@ impl Item {
 
     fn run(self, config: &Path) -> anyhow::Result<()> {
         match self {
+            // Handled by the menu loop, which owns stdin.
+            Item::Settings => Ok(()),
             Item::Start => super::start(None),
             Item::StartKerys => super::start_kerys(),
             Item::Stop => super::stop(),
@@ -233,7 +246,7 @@ fn summary() -> Option<String> {
 }
 
 #[cfg(windows)]
-fn clear_screen() {
+pub(crate) fn clear_screen() {
     let _ = std::process::Command::new("cmd")
         .args(["/c", "cls"])
         .status();
@@ -280,7 +293,7 @@ fn add_to_path() -> anyhow::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn clear_screen() {}
+pub(crate) fn clear_screen() {}
 
 #[cfg(not(windows))]
 fn open(_path: &Path) -> anyhow::Result<()> {
