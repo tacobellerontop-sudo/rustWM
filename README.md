@@ -150,6 +150,13 @@ freely.
   `cycle-stack next|prev` flips through them, `unstack` gives the window its own tile
   again, `stack-all` / `unstack-all` do the whole workspace. Closing the shown window
   shows the next one in the same tile. Status bars see stacks in `rwm query state`.
+- **Stack tab bar** (komorebi's stackbar, Hyprland's groupbar): every stack gets a strip
+  of tabs on top listing its windows by title; click a tab to show that window.
+  `[stackbar]` sets the height and colours, or turns it off.
+- **Window swallowing** (Hyprland's `enable_swallow`): with `[swallow] enabled = true`,
+  an app started from a terminal (Windows Terminal, WezTerm, Alacritty, cmd, pwsh…) takes
+  the terminal's tile, and the terminal comes back when the app closes. The terminal is
+  stacked under the app, so `cycle-stack` or its tab shows it meanwhile.
 - **Pin** (`toggle-pin`, or a `pin` rule): a floating window that stays on screen when
   its monitor switches workspace, like a video player.
 - **Maximize** (`toggle-maximize`): fill the work area but keep gaps and the taskbar,
@@ -161,7 +168,9 @@ freely.
   along), `swap-workspaces right` (trade windows with the next monitor).
 - **Layouts**: `columns`, `rows`, `grid` and `center` (the first window in the middle,
   for ultrawide screens) join dwindle, master and monocle. `flip-layout horizontal|vertical`
-  mirrors any layout. In dwindle, `toggle-split` turns the split the focused window is in
+  mirrors any layout. In master, `master-count +1|-1|<n>` sets how many windows share the
+  master area and `master-side left|right|top|bottom|next` moves it (Hyprland's `nmaster`
+  and `orientation`; `master_count` / `master_side` in the config). In dwindle, `toggle-split` turns the split the focused window is in
   between side-by-side and stacked (Hyprland's `togglesplit`).
 - **Keyboard resizing**: `resize left|right|up|down [pixels]` moves the edge between the
   focused window and its neighbour (a floating window grows on that side), and
@@ -169,6 +178,12 @@ freely.
 - **Pause** (`toggle-pause`): leave all windows alone until resumed; windows opened in
   between are picked up then. `unmanage` lets go of one window, `manage` forces rustWM
   to take one it skipped.
+- **Focus any window** (`focus-window <handle|exe:regex|title:regex|class:regex>`):
+  switches to its workspace or stack tab; with several matches, each run goes to the
+  next one (Hyprland's `focuswindow`). `minimize` minimizes the focused window.
+- **Rules**: `size 800x600` floats a window at that size, centred.
+- **Room for a status bar**: `[work_area_offset] top = 32` (or bottom/left/right) keeps
+  that much space free on every monitor (komorebi's `work_area_offset`).
 - **Translucent unfocused windows** (`inactive_opacity`) and **mouse follows focus**.
 - **Animations**: windows slide to their new place (ease-out, 200 ms by default; the
   focus border slides along). `[animation] enabled = false` or `duration_ms` to tune.
@@ -210,8 +225,10 @@ Bindings and `rwm <command>` use one command language:
 `focus-monitor <dir>`, `move-to-monitor <dir>`,
 `layout <dwindle|master|monocle|columns|rows|grid|center|reset>`,
 `cycle-layout [next|prev]`, `flip-layout <horizontal|vertical>`, `toggle-split`,
+`master-count <+n|-n|n>`, `master-side <left|right|top|bottom|next>`,
 `resize <grow|shrink> [amount]`, `resize <dir> [pixels]`, `toggle-float`,
-`toggle-fullscreen`, `toggle-maximize`, `toggle-pin`, `center`,
+`toggle-fullscreen`, `toggle-maximize`, `toggle-pin`, `center`, `minimize`,
+`focus-window <handle|exe:regex|title:regex|class:regex>`,
 `stack <dir>`, `unstack`, `cycle-stack <next|prev>`, `stack-all`, `unstack-all`,
 `toggle-special [name]`, `toggle-pause`, `manage`, `unmanage`, `mode <name>`,
 `retile`, `reload`, `restore`, `quit`.

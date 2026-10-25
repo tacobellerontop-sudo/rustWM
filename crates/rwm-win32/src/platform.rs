@@ -12,8 +12,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput}
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, GetShellWindow, GetSystemMetrics, IsIconic, IsWindowVisible,
     IsZoomed, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOWNA, SetCursorPos, SetForegroundWindow,
-    ShowWindowAsync, WM_CLOSE,
+    SM_YVIRTUALSCREEN, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNA, SetCursorPos,
+    SetForegroundWindow, ShowWindowAsync, WM_CLOSE,
 };
 
 use crate::hidden::Hidden;
@@ -337,6 +337,25 @@ impl Platform for Win32Platform {
 
     fn set_border(&mut self, border: Option<rwm_core::Border>) {
         crate::border::update(border);
+    }
+
+    fn set_stackbars(&mut self, bars: &[rwm_core::platform::Stackbar]) {
+        crate::stackbar::update(bars);
+    }
+
+    fn minimize(&mut self, handle: WindowHandle) -> Result<()> {
+        let hwnd = self.checked(handle)?;
+        // SAFETY: validated handle; the async variant never blocks on a hung app.
+        let _ = unsafe { ShowWindowAsync(hwnd, SW_MINIMIZE) };
+        Ok(())
+    }
+
+    fn process_id(&self, handle: WindowHandle) -> Option<u32> {
+        Some(window::process_id(window::hwnd(handle))).filter(|p| *p != 0)
+    }
+
+    fn ancestor_pids(&self, pid: u32) -> Vec<u32> {
+        window::ancestor_pids(pid)
     }
 
     fn set_cursor_pos(&mut self, x: i32, y: i32) -> Result<()> {

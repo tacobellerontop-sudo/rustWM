@@ -7,10 +7,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use rwm_core::Command;
-use rwm_core::layout::{Gaps, LayoutKind};
+use rwm_core::layout::{Gaps, LayoutKind, Side};
 use rwm_core::platform::HideMethod;
 use rwm_core::rules::{Rule, RuleAction};
-use rwm_core::wm::{BorderSettings, DEFAULT_MODE, Settings, WorkspaceOverride};
+use rwm_core::wm::{
+    BorderSettings, DEFAULT_MODE, Offsets, Settings, StackbarSettings, SwallowSettings,
+    WorkspaceOverride,
+};
 use rwm_core::workspace::{InsertPos, WorkspaceMode};
 use serde::Deserialize;
 
@@ -30,6 +33,9 @@ pub struct Config {
     pub gaps: GapsConfig,
     pub border: BorderConfig,
     pub animation: AnimationConfig,
+    pub stackbar: StackbarConfig,
+    pub swallow: SwallowConfig,
+    pub work_area_offset: OffsetConfig,
     /// Per-workspace overrides: `[workspace.<name>]`.
     pub workspace: BTreeMap<String, WorkspaceConfig>,
     pub bindings: BTreeMap<String, String>,
@@ -50,6 +56,9 @@ pub struct General {
     pub workspace_back_and_forth: bool,
     /// Layouts `cycle-layout` goes through.
     pub layout_cycle: Vec<LayoutKind>,
+    /// Windows in the master area of the master layout.
+    pub master_count: usize,
+    pub master_side: Side,
     pub inactive_opacity: f32,
     pub hide_method: HideMethod,
     /// Command line launched by the `terminal` command. `None` falls back to
@@ -70,6 +79,8 @@ impl Default for General {
             mouse_follows_focus: s.mouse_follows_focus,
             workspace_back_and_forth: s.workspace_back_and_forth,
             layout_cycle: s.layout_cycle,
+            master_count: s.master_count,
+            master_side: s.master_side,
             inactive_opacity: s.inactive_opacity,
             hide_method: s.hide_method,
             terminal: None,
@@ -93,6 +104,96 @@ impl Default for AnimationConfig {
             duration_ms: rwm_core::wm::DEFAULT_ANIMATION_MS,
         }
     }
+}
+
+/// `[stackbar]`: tab bars over stacked tiles.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StackbarConfig {
+    pub enabled: bool,
+    pub height: i32,
+    /// `#rrggbb` colours.
+    pub active_color: String,
+    pub inactive_color: String,
+    pub text_color: String,
+}
+
+impl Default for StackbarConfig {
+    fn default() -> Self {
+        let s = StackbarSettings::default();
+        Self {
+            enabled: s.enabled,
+            height: s.height,
+            active_color: format!("#{:06x}", s.active_color),
+            inactive_color: format!("#{:06x}", s.inactive_color),
+            text_color: format!("#{:06x}", s.text_color),
+        }
+    }
+}
+
+/// The terminals that swallow apps by default.
+pub const DEFAULT_TERMINALS: &[&str] = &[
+    "WindowsTerminal.exe",
+    "wezterm-gui.exe",
+    "alacritty.exe",
+    "kitty.exe",
+    "ghostty.exe",
+    "rio.exe",
+    "conhost.exe",
+    "OpenConsole.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+];
+
+/// `[swallow]`: apps started from a terminal take its tile.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SwallowConfig {
+    pub enabled: bool,
+    /// Executable names (regexes, whole name, any case) that swallow.
+    pub terminals: Vec<String>,
+    /// Executables never swallowed.
+    pub exceptions: Vec<String>,
+}
+
+impl Default for SwallowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            terminals: DEFAULT_TERMINALS
+                .iter()
+                .map(|t| t.replace('.', "\\."))
+                .collect(),
+            exceptions: Vec::new(),
+        }
+    }
+}
+
+/// `[work_area_offset]`: space kept free at the monitor edges.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OffsetConfig {
+    pub top: i32,
+    pub bottom: i32,
+    pub left: i32,
+    pub right: i32,
+}
+
+/// One case-insensitive regex matching the whole of any of `patterns`.
+fn any_of(patterns: &[String]) -> Result<Option<regex::Regex>, regex::Error> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let alternation = patterns
+        .iter()
+        .map(|p| format!("(?:{p})"))
+        .collect::<Vec<_>>()
+        .join("|");
+    regex::RegexBuilder::new(&format!("^(?:{alternation})$"))
+        .case_insensitive(true)
+        .build()
+        .map(Some)
 }
 
 /// `[workspace.<name>]`: settings for one workspace.
@@ -362,6 +463,58 @@ impl Config {
             BorderSettings::default().color
         });
 
+        if !(1..=10).contains(&self.general.master_count) {
+            errors.push(format!(
+                "general.master_count: must be 1 to 10, got {}",
+                self.general.master_count
+            ));
+        }
+        let o = &self.work_area_offset;
+        if [o.top, o.bottom, o.left, o.right]
+            .iter()
+            .any(|v| !(0..=2000).contains(v))
+        {
+            errors.push("work_area_offset: values must be 0 to 2000".into());
+        }
+        let sb = &self.stackbar;
+        if !(8..=100).contains(&sb.height) {
+            errors.push(format!(
+                "stackbar.height: must be 8 to 100, got {}",
+                sb.height
+            ));
+        }
+        let mut color = |field: &str, value: &str, fallback: u32| {
+            parse_color(value).unwrap_or_else(|| {
+                errors.push(format!(
+                    "stackbar.{field}: `{value}` is not a #rrggbb colour"
+                ));
+                fallback
+            })
+        };
+        let sb_default = StackbarSettings::default();
+        let stackbar = StackbarSettings {
+            enabled: sb.enabled,
+            height: sb.height,
+            active_color: color("active_color", &sb.active_color, sb_default.active_color),
+            inactive_color: color(
+                "inactive_color",
+                &sb.inactive_color,
+                sb_default.inactive_color,
+            ),
+            text_color: color("text_color", &sb.text_color, sb_default.text_color),
+        };
+        let mut regexes = |field: &str, patterns: &[String]| {
+            any_of(patterns).unwrap_or_else(|e| {
+                errors.push(format!("swallow.{field}: {e}"));
+                None
+            })
+        };
+        let swallow = SwallowSettings {
+            enabled: self.swallow.enabled,
+            terminals: regexes("terminals", &self.swallow.terminals),
+            exceptions: regexes("exceptions", &self.swallow.exceptions),
+        };
+
         let mut bindings: BTreeMap<Chord, String> = default_bindings().into_iter().collect();
         parse_bindings("bindings", &self.bindings, &mut bindings, &mut errors);
 
@@ -443,6 +596,16 @@ impl Config {
                 mouse_follows_focus: self.general.mouse_follows_focus,
                 workspace_back_and_forth: self.general.workspace_back_and_forth,
                 layout_cycle: self.general.layout_cycle,
+                master_count: self.general.master_count,
+                master_side: self.general.master_side,
+                work_area_offset: Offsets {
+                    top: o.top,
+                    bottom: o.bottom,
+                    left: o.left,
+                    right: o.right,
+                },
+                swallow,
+                stackbar,
                 inactive_opacity: opacity,
                 hide_method: self.general.hide_method,
                 animation_ms: if self.animation.enabled {
@@ -672,6 +835,62 @@ mod tests {
         assert!(errors.contains("no [modes.nowhere]"), "{errors}");
         assert!(errors.contains("modes.trap: needs a binding"), "{errors}");
         assert!(errors.contains("default mode is [bindings]"), "{errors}");
+    }
+
+    #[test]
+    fn master_stackbar_swallow_and_offset() {
+        let s = parse("").unwrap().settings;
+        assert!(!s.swallow.enabled);
+        let t = s.swallow.terminals.unwrap();
+        assert!(t.is_match("windowsterminal.exe") && !t.is_match("xwindowsterminal.exe"));
+        assert!(s.stackbar.enabled);
+
+        let s = parse(
+            r#"
+            [general]
+            master_count = 2
+            master_side = "top"
+            [work_area_offset]
+            top = 32
+            [stackbar]
+            height = 24
+            active_color = '#ff0000'
+            [swallow]
+            enabled = true
+            terminals = ["wezterm-gui\\.exe"]
+            exceptions = ["mpv\\.exe"]
+            "#,
+        )
+        .unwrap()
+        .settings;
+        assert_eq!((s.master_count, s.master_side), (2, Side::Top));
+        assert_eq!(s.work_area_offset.top, 32);
+        assert_eq!((s.stackbar.height, s.stackbar.active_color), (24, 0xff0000));
+        assert!(s.swallow.enabled);
+        assert!(s.swallow.exceptions.unwrap().is_match("MPV.exe"));
+
+        let errors = invalid(
+            r#"
+            [general]
+            master_count = 0
+            [work_area_offset]
+            left = -5
+            [stackbar]
+            height = 2
+            text_color = "white"
+            [swallow]
+            terminals = ["("]
+            "#,
+        );
+        for e in [
+            "general.master_count",
+            "work_area_offset",
+            "stackbar.height",
+            "stackbar.text_color",
+            "swallow.terminals",
+        ] {
+            assert!(errors.iter().any(|x| x.contains(e)), "{e}: {errors:?}");
+        }
     }
 
     #[test]

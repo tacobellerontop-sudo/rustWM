@@ -20,6 +20,8 @@ pub enum RuleAction {
     Monitor(usize),
     /// Float the window and keep it on screen on every workspace.
     Pin,
+    /// Float the window at this size (logical pixels), centred.
+    Size(i32, i32),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +35,7 @@ pub enum RuleError {
         source: regex::Error,
     },
     #[error(
-        "unknown rule action `{0}` (expected float, tile, ignore, pin, workspace <name> or monitor <n>)"
+        "unknown rule action `{0}` (expected float, tile, ignore, pin, size <w>x<h>, workspace <name> or monitor <n>)"
     )]
     Action(String),
 }
@@ -72,6 +74,13 @@ impl RuleAction {
                 .ok()
                 .filter(|n| *n >= 1)
                 .map(Self::Monitor)
+                .ok_or_else(|| RuleError::Action(s.into())),
+            Some(("size", size)) => size
+                .trim()
+                .split_once('x')
+                .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+                .filter(|&(w, h): &(i32, i32)| w > 0 && h > 0)
+                .map(|(w, h)| Self::Size(w, h))
                 .ok_or_else(|| RuleError::Action(s.into())),
             Some(("workspace", name)) if !name.trim().is_empty() => {
                 Ok(Self::Workspace(name.trim().into()))
@@ -122,6 +131,8 @@ pub struct Verdict {
     pub workspace: Option<String>,
     /// 0-based monitor index.
     pub monitor: Option<usize>,
+    /// Size to float the window at, in logical pixels.
+    pub size: Option<(i32, i32)>,
 }
 
 pub fn evaluate(rules: &[Rule], w: &WindowInfo) -> Verdict {
@@ -136,6 +147,10 @@ pub fn evaluate(rules: &[Rule], w: &WindowInfo) -> Verdict {
                 RuleAction::Monitor(n) => v.monitor = Some(n - 1),
                 RuleAction::Pin => {
                     v.pin = true;
+                    v.float = true;
+                }
+                RuleAction::Size(w, h) => {
+                    v.size = Some((*w, *h));
                     v.float = true;
                 }
             }
@@ -230,6 +245,12 @@ mod tests {
         assert!(RuleAction::parse("monitor 0").is_err());
         assert!(RuleAction::parse("monitor x").is_err());
         assert!(RuleAction::parse("explode").is_err());
+        assert_eq!(
+            RuleAction::parse("size 800x600").unwrap(),
+            RuleAction::Size(800, 600)
+        );
+        assert!(RuleAction::parse("size 800").is_err());
+        assert!(RuleAction::parse("size 0x600").is_err());
         assert!(matches!(
             Rule::new(None, None, None, vec![]),
             Err(RuleError::NoMatcher)
