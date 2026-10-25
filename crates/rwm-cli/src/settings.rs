@@ -48,13 +48,27 @@ const SETTINGS: &[Setting] = &[
         label: "Layout for new workspaces",
         section: "general",
         key: "default_layout",
-        kind: Kind::Choice(&["dwindle", "master", "monocle"]),
+        kind: Kind::Choice(&[
+            "dwindle", "master", "monocle", "columns", "rows", "grid", "center",
+        ]),
     },
     Setting {
         label: "Where new windows go",
         section: "general",
         key: "new_window",
         kind: Kind::Choice(&["after-focused", "end", "start"]),
+    },
+    Setting {
+        label: "Mouse follows keyboard focus",
+        section: "general",
+        key: "mouse_follows_focus",
+        kind: Kind::Bool,
+    },
+    Setting {
+        label: "Workspace key twice goes back",
+        section: "general",
+        key: "workspace_back_and_forth",
+        kind: Kind::Bool,
     },
     Setting {
         label: "Terminal (Win+Enter)",
@@ -98,6 +112,24 @@ const SETTINGS: &[Setting] = &[
         key: "smart",
         kind: Kind::Bool,
     },
+    Setting {
+        label: "Master area side",
+        section: "general",
+        key: "master_side",
+        kind: Kind::Choice(&["left", "right", "top", "bottom"]),
+    },
+    Setting {
+        label: "Tab bar over stacks",
+        section: "stackbar",
+        key: "enabled",
+        kind: Kind::Bool,
+    },
+    Setting {
+        label: "Apps swallow their terminal",
+        section: "swallow",
+        key: "enabled",
+        kind: Kind::Bool,
+    },
 ];
 
 /// The current value of `s` as shown in the menu.
@@ -105,6 +137,8 @@ fn current(s: &Setting, cfg: &Settings) -> String {
     let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
     match (s.section, s.key) {
         ("general", "focus_follows_mouse") => on_off(cfg.focus_follows_mouse),
+        ("general", "mouse_follows_focus") => on_off(cfg.mouse_follows_focus),
+        ("general", "workspace_back_and_forth") => on_off(cfg.workspace_back_and_forth),
         ("general", "workspace_mode") => cfg.workspace_mode.to_string(),
         ("general", "default_layout") => cfg.default_layout.to_string(),
         ("general", "new_window") => match cfg.new_window {
@@ -123,6 +157,9 @@ fn current(s: &Setting, cfg: &Settings) -> String {
         ("gaps", "inner") => cfg.gaps.inner.to_string(),
         ("gaps", "outer") => cfg.gaps.outer.to_string(),
         ("gaps", "smart") => on_off(cfg.gaps.smart),
+        ("general", "master_side") => cfg.master_side.to_string(),
+        ("stackbar", "enabled") => on_off(cfg.stackbar.enabled),
+        ("swallow", "enabled") => on_off(cfg.swallow.enabled),
         _ => String::new(),
     }
 }
@@ -401,10 +438,14 @@ mod tests {
         let layout = &SETTINGS[2];
         assert_eq!(
             new_value(layout, "monocle", &mut no_input).unwrap(),
+            Some(NewValue::Str("columns".into()))
+        );
+        assert_eq!(
+            new_value(layout, "center", &mut no_input).unwrap(),
             Some(NewValue::Str("dwindle".into()))
         );
         let mut typed = std::io::Cursor::new("12\n");
-        let width = &SETTINGS[6];
+        let width = &SETTINGS[8];
         assert_eq!(
             new_value(width, "3", &mut typed).unwrap(),
             Some(NewValue::Int(12))

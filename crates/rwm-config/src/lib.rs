@@ -3,13 +3,17 @@
 
 pub mod keys;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use rwm_core::Command;
-use rwm_core::layout::{Gaps, LayoutKind};
+use rwm_core::layout::{Gaps, LayoutKind, Side};
+use rwm_core::platform::HideMethod;
 use rwm_core::rules::{Rule, RuleAction};
-use rwm_core::wm::{BorderSettings, DEFAULT_MODE, Settings};
+use rwm_core::wm::{
+    BorderSettings, DEFAULT_MODE, Offsets, Settings, StackbarSettings, SwallowSettings,
+    WorkspaceOverride,
+};
 use rwm_core::workspace::{InsertPos, WorkspaceMode};
 use serde::Deserialize;
 
@@ -28,6 +32,12 @@ pub struct Config {
     pub general: General,
     pub gaps: GapsConfig,
     pub border: BorderConfig,
+    pub animation: AnimationConfig,
+    pub stackbar: StackbarConfig,
+    pub swallow: SwallowConfig,
+    pub work_area_offset: OffsetConfig,
+    /// Per-workspace overrides: `[workspace.<name>]`.
+    pub workspace: BTreeMap<String, WorkspaceConfig>,
     pub bindings: BTreeMap<String, String>,
     /// Extra binding modes: mode name -> chord -> command.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
@@ -42,9 +52,19 @@ pub struct General {
     pub workspaces: Vec<String>,
     pub workspace_mode: WorkspaceMode,
     pub focus_follows_mouse: bool,
+    pub mouse_follows_focus: bool,
+    pub workspace_back_and_forth: bool,
+    /// Layouts `cycle-layout` goes through.
+    pub layout_cycle: Vec<LayoutKind>,
+    /// Windows in the master area of the master layout.
+    pub master_count: usize,
+    pub master_side: Side,
+    pub inactive_opacity: f32,
+    pub hide_method: HideMethod,
     /// Command line launched by the `terminal` command. `None` falls back to
     /// `wt.exe`, then `cmd.exe`.
     pub terminal: Option<String>,
+    pub exec_on_start: Vec<String>,
 }
 
 impl Default for General {
@@ -56,9 +76,133 @@ impl Default for General {
             workspaces: s.workspaces,
             workspace_mode: s.workspace_mode,
             focus_follows_mouse: s.focus_follows_mouse,
+            mouse_follows_focus: s.mouse_follows_focus,
+            workspace_back_and_forth: s.workspace_back_and_forth,
+            layout_cycle: s.layout_cycle,
+            master_count: s.master_count,
+            master_side: s.master_side,
+            inactive_opacity: s.inactive_opacity,
+            hide_method: s.hide_method,
             terminal: None,
+            exec_on_start: Vec::new(),
         }
     }
+}
+
+/// `[animation]`: sliding windows to their new place.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnimationConfig {
+    pub enabled: bool,
+    pub duration_ms: u32,
+}
+
+impl Default for AnimationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            duration_ms: rwm_core::wm::DEFAULT_ANIMATION_MS,
+        }
+    }
+}
+
+/// `[stackbar]`: tab bars over stacked tiles.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StackbarConfig {
+    pub enabled: bool,
+    pub height: i32,
+    /// `#rrggbb` colours.
+    pub active_color: String,
+    pub inactive_color: String,
+    pub text_color: String,
+}
+
+impl Default for StackbarConfig {
+    fn default() -> Self {
+        let s = StackbarSettings::default();
+        Self {
+            enabled: s.enabled,
+            height: s.height,
+            active_color: format!("#{:06x}", s.active_color),
+            inactive_color: format!("#{:06x}", s.inactive_color),
+            text_color: format!("#{:06x}", s.text_color),
+        }
+    }
+}
+
+/// The terminals that swallow apps by default.
+pub const DEFAULT_TERMINALS: &[&str] = &[
+    "WindowsTerminal.exe",
+    "wezterm-gui.exe",
+    "alacritty.exe",
+    "kitty.exe",
+    "ghostty.exe",
+    "rio.exe",
+    "conhost.exe",
+    "OpenConsole.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+];
+
+/// `[swallow]`: apps started from a terminal take its tile.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SwallowConfig {
+    pub enabled: bool,
+    /// Executable names (regexes, whole name, any case) that swallow.
+    pub terminals: Vec<String>,
+    /// Executables never swallowed.
+    pub exceptions: Vec<String>,
+}
+
+impl Default for SwallowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            terminals: DEFAULT_TERMINALS
+                .iter()
+                .map(|t| t.replace('.', "\\."))
+                .collect(),
+            exceptions: Vec::new(),
+        }
+    }
+}
+
+/// `[work_area_offset]`: space kept free at the monitor edges.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OffsetConfig {
+    pub top: i32,
+    pub bottom: i32,
+    pub left: i32,
+    pub right: i32,
+}
+
+/// One case-insensitive regex matching the whole of any of `patterns`.
+fn any_of(patterns: &[String]) -> Result<Option<regex::Regex>, regex::Error> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let alternation = patterns
+        .iter()
+        .map(|p| format!("(?:{p})"))
+        .collect::<Vec<_>>()
+        .join("|");
+    regex::RegexBuilder::new(&format!("^(?:{alternation})$"))
+        .case_insensitive(true)
+        .build()
+        .map(Some)
+}
+
+/// `[workspace.<name>]`: settings for one workspace.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    pub layout: Option<LayoutKind>,
+    pub gaps_inner: Option<i32>,
+    pub gaps_outer: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -259,6 +403,52 @@ impl Config {
         if self.gaps.inner < 0 || self.gaps.outer < 0 {
             errors.push("gaps: inner and outer must not be negative".into());
         }
+        if self.animation.duration_ms > 1000 {
+            errors.push(format!(
+                "animation.duration_ms: must be 0 to 1000, got {}",
+                self.animation.duration_ms
+            ));
+        }
+        if self.general.layout_cycle.is_empty() {
+            errors.push("general.layout_cycle: needs at least one layout".into());
+        }
+        let opacity = self.general.inactive_opacity;
+        if !(0.1..=1.0).contains(&opacity) {
+            errors.push(format!(
+                "general.inactive_opacity: must be 0.1 to 1.0, got {opacity}"
+            ));
+        }
+        if self
+            .general
+            .exec_on_start
+            .iter()
+            .any(|c| c.trim().is_empty())
+        {
+            errors.push("general.exec_on_start: entries must not be empty".into());
+        }
+        let mut workspace_overrides = HashMap::new();
+        for (name, w) in &self.workspace {
+            if !self.general.workspaces.contains(name) {
+                errors.push(format!(
+                    "workspace.{name}: no workspace called `{name}` in general.workspaces"
+                ));
+            }
+            if w.gaps_inner.is_some_and(|g| g < 0) || w.gaps_outer.is_some_and(|g| g < 0) {
+                errors.push(format!("workspace.{name}: gaps must not be negative"));
+            }
+            let gaps = (w.gaps_inner.is_some() || w.gaps_outer.is_some()).then(|| Gaps {
+                inner: w.gaps_inner.unwrap_or(self.gaps.inner),
+                outer: w.gaps_outer.unwrap_or(self.gaps.outer),
+                smart: self.gaps.smart,
+            });
+            workspace_overrides.insert(
+                name.clone(),
+                WorkspaceOverride {
+                    layout: w.layout,
+                    gaps,
+                },
+            );
+        }
         if !(0..=50).contains(&self.border.width) {
             errors.push(format!(
                 "border.width: must be 0 to 50, got {}",
@@ -272,6 +462,58 @@ impl Config {
             ));
             BorderSettings::default().color
         });
+
+        if !(1..=10).contains(&self.general.master_count) {
+            errors.push(format!(
+                "general.master_count: must be 1 to 10, got {}",
+                self.general.master_count
+            ));
+        }
+        let o = &self.work_area_offset;
+        if [o.top, o.bottom, o.left, o.right]
+            .iter()
+            .any(|v| !(0..=2000).contains(v))
+        {
+            errors.push("work_area_offset: values must be 0 to 2000".into());
+        }
+        let sb = &self.stackbar;
+        if !(8..=100).contains(&sb.height) {
+            errors.push(format!(
+                "stackbar.height: must be 8 to 100, got {}",
+                sb.height
+            ));
+        }
+        let mut color = |field: &str, value: &str, fallback: u32| {
+            parse_color(value).unwrap_or_else(|| {
+                errors.push(format!(
+                    "stackbar.{field}: `{value}` is not a #rrggbb colour"
+                ));
+                fallback
+            })
+        };
+        let sb_default = StackbarSettings::default();
+        let stackbar = StackbarSettings {
+            enabled: sb.enabled,
+            height: sb.height,
+            active_color: color("active_color", &sb.active_color, sb_default.active_color),
+            inactive_color: color(
+                "inactive_color",
+                &sb.inactive_color,
+                sb_default.inactive_color,
+            ),
+            text_color: color("text_color", &sb.text_color, sb_default.text_color),
+        };
+        let mut regexes = |field: &str, patterns: &[String]| {
+            any_of(patterns).unwrap_or_else(|e| {
+                errors.push(format!("swallow.{field}: {e}"));
+                None
+            })
+        };
+        let swallow = SwallowSettings {
+            enabled: self.swallow.enabled,
+            terminals: regexes("terminals", &self.swallow.terminals),
+            exceptions: regexes("exceptions", &self.swallow.exceptions),
+        };
 
         let mut bindings: BTreeMap<Chord, String> = default_bindings().into_iter().collect();
         parse_bindings("bindings", &self.bindings, &mut bindings, &mut errors);
@@ -351,6 +593,33 @@ impl Config {
                 workspaces: self.general.workspaces,
                 workspace_mode: self.general.workspace_mode,
                 focus_follows_mouse: self.general.focus_follows_mouse,
+                mouse_follows_focus: self.general.mouse_follows_focus,
+                workspace_back_and_forth: self.general.workspace_back_and_forth,
+                layout_cycle: self.general.layout_cycle,
+                master_count: self.general.master_count,
+                master_side: self.general.master_side,
+                work_area_offset: Offsets {
+                    top: o.top,
+                    bottom: o.bottom,
+                    left: o.left,
+                    right: o.right,
+                },
+                swallow,
+                stackbar,
+                inactive_opacity: opacity,
+                hide_method: self.general.hide_method,
+                animation_ms: if self.animation.enabled {
+                    self.animation.duration_ms
+                } else {
+                    0
+                },
+                exec_on_start: self
+                    .general
+                    .exec_on_start
+                    .iter()
+                    .map(|c| c.trim().to_string())
+                    .collect(),
+                workspace_overrides,
                 border: BorderSettings {
                     enabled: self.border.enabled,
                     width: self.border.width,
@@ -566,6 +835,131 @@ mod tests {
         assert!(errors.contains("no [modes.nowhere]"), "{errors}");
         assert!(errors.contains("modes.trap: needs a binding"), "{errors}");
         assert!(errors.contains("default mode is [bindings]"), "{errors}");
+    }
+
+    #[test]
+    fn master_stackbar_swallow_and_offset() {
+        let s = parse("").unwrap().settings;
+        assert!(!s.swallow.enabled);
+        let t = s.swallow.terminals.unwrap();
+        assert!(t.is_match("windowsterminal.exe") && !t.is_match("xwindowsterminal.exe"));
+        assert!(s.stackbar.enabled);
+
+        let s = parse(
+            r#"
+            [general]
+            master_count = 2
+            master_side = "top"
+            [work_area_offset]
+            top = 32
+            [stackbar]
+            height = 24
+            active_color = '#ff0000'
+            [swallow]
+            enabled = true
+            terminals = ["wezterm-gui\\.exe"]
+            exceptions = ["mpv\\.exe"]
+            "#,
+        )
+        .unwrap()
+        .settings;
+        assert_eq!((s.master_count, s.master_side), (2, Side::Top));
+        assert_eq!(s.work_area_offset.top, 32);
+        assert_eq!((s.stackbar.height, s.stackbar.active_color), (24, 0xff0000));
+        assert!(s.swallow.enabled);
+        assert!(s.swallow.exceptions.unwrap().is_match("MPV.exe"));
+
+        let errors = invalid(
+            r#"
+            [general]
+            master_count = 0
+            [work_area_offset]
+            left = -5
+            [stackbar]
+            height = 2
+            text_color = "white"
+            [swallow]
+            terminals = ["("]
+            "#,
+        );
+        for e in [
+            "general.master_count",
+            "work_area_offset",
+            "stackbar.height",
+            "stackbar.text_color",
+            "swallow.terminals",
+        ] {
+            assert!(errors.iter().any(|x| x.contains(e)), "{e}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn komorebi_and_hyprland_style_settings() {
+        let loaded = parse(
+            r#"
+            [general]
+            workspaces = ["web", "code"]
+            mouse_follows_focus = true
+            workspace_back_and_forth = true
+            layout_cycle = ["dwindle", "center", "grid"]
+            inactive_opacity = 0.85
+            exec_on_start = ["yasb.exe"]
+
+            [workspace.code]
+            layout = "columns"
+            gaps_inner = 0
+
+            [[rules]]
+            match = { exe = "mpv.exe" }
+            actions = ["pin", "monitor 2"]
+            "#,
+        )
+        .unwrap();
+        let s = &loaded.settings;
+        assert!(s.mouse_follows_focus && s.workspace_back_and_forth);
+        assert_eq!(
+            s.layout_cycle,
+            vec![LayoutKind::Dwindle, LayoutKind::Center, LayoutKind::Grid]
+        );
+        assert_eq!(s.inactive_opacity, 0.85);
+        assert_eq!(s.exec_on_start, vec!["yasb.exe"]);
+        let code = &s.workspace_overrides["code"];
+        assert_eq!(code.layout, Some(LayoutKind::Columns));
+        assert_eq!(code.gaps.map(|g| (g.inner, g.outer)), Some((0, 8)));
+        assert_eq!(
+            s.rules[0].actions,
+            vec![RuleAction::Pin, RuleAction::Monitor(2)]
+        );
+
+        let errors = invalid(
+            r#"
+            [general]
+            layout_cycle = []
+            inactive_opacity = 0.0
+            [workspace.nope]
+            layout = "grid"
+            "#,
+        )
+        .join("\n");
+        for needle in ["layout_cycle", "inactive_opacity", "workspace.nope"] {
+            assert!(errors.contains(needle), "missing `{needle}` in:\n{errors}");
+        }
+    }
+
+    #[test]
+    fn animation_and_hiding() {
+        let s = parse("").unwrap().settings;
+        assert_eq!(s.hide_method, HideMethod::Offscreen);
+        assert_eq!(s.animation_ms, rwm_core::wm::DEFAULT_ANIMATION_MS);
+        let s = parse(
+            "[general]\nhide_method = \"hide\"\n[animation]\nenabled = false\nduration_ms = 300",
+        )
+        .unwrap()
+        .settings;
+        assert_eq!(s.hide_method, HideMethod::Hide);
+        assert_eq!(s.animation_ms, 0);
+        assert!(parse("[animation]\nduration_ms = 5000").is_err());
+        assert!(parse("[general]\nhide_method = \"vanish\"").is_err());
     }
 
     #[test]

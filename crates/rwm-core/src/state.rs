@@ -14,6 +14,9 @@ pub struct State {
     pub mode: String,
     /// The special workspace currently shown, if any.
     pub special: Option<String>,
+    /// Tiling is paused (`toggle-pause`).
+    #[serde(default)]
+    pub paused: bool,
     pub monitors: Vec<MonitorState>,
 }
 
@@ -32,7 +35,12 @@ pub struct WorkspaceState {
     pub name: String,
     pub layout: LayoutKind,
     pub focused: Option<isize>,
+    /// Every window, including ones hidden behind others in a stack.
     pub windows: Vec<WindowState>,
+    /// Windows sharing a tile, in stack order; the one shown is in `windows`
+    /// with `stacked_hidden: false`.
+    #[serde(default)]
+    pub stacks: Vec<Vec<isize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +51,13 @@ pub struct WindowState {
     pub class: String,
     pub floating: bool,
     pub fullscreen: bool,
+    #[serde(default)]
+    pub maximized: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    /// Hidden behind another window of its stack.
+    #[serde(default)]
+    pub stacked_hidden: bool,
 }
 
 /// Topics a subscriber can ask for.
@@ -70,6 +85,7 @@ impl State {
             Vec<(&'a str, &'a str, Vec<(&'a str, LayoutKind)>)>,
             &'a str,
             Option<&'a str>,
+            bool,
         );
         fn ws_shape(s: &State) -> Shape<'_> {
             let monitors = s
@@ -84,7 +100,7 @@ impl State {
                     (m.id.as_str(), m.active_workspace.as_str(), layouts)
                 })
                 .collect();
-            (monitors, s.mode.as_str(), s.special.as_deref())
+            (monitors, s.mode.as_str(), s.special.as_deref(), s.paused)
         }
         if ws_shape(self) != ws_shape(old) {
             topics.push("workspace");

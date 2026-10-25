@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, w};
 
-use crate::{border, hotkeys, tray, window};
+use crate::{border, hotkeys, stackbar, tray, window};
 
 /// Where every callback sends its events. Set once by [`EventThread::spawn`];
 /// the callbacks are plain `extern "system"` functions with no user data.
@@ -204,6 +204,7 @@ fn run() {
     let keyboard = hotkeys::install();
     let hidden = create_hidden_window();
     border::create();
+    stackbar::create();
     match hidden {
         Some(h) => tray::add(h),
         None => warn!("could not create the hidden window; display changes will be missed"),

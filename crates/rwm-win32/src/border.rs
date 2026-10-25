@@ -85,6 +85,23 @@ pub(crate) fn update(border: Option<Border>) {
     }
 }
 
+/// Window `h` is sliding and its visible frame is at `frame` right now: if
+/// the border is around it, move the border along.
+pub(crate) fn track(h: rwm_core::WindowHandle, frame: rwm_core::Rect) {
+    {
+        let mut wanted = WANTED.lock().unwrap_or_else(|e| e.into_inner());
+        match wanted.as_mut() {
+            Some(b) if b.window == h && b.rect != frame => b.rect = frame,
+            _ => return,
+        }
+    }
+    let raw = HWND_RAW.load(Ordering::Acquire);
+    if raw != 0 {
+        // SAFETY: posting to our own window never blocks.
+        let _ = unsafe { PostMessageW(Some(HWND(raw as *mut _)), WM_UPDATE, WPARAM(0), LPARAM(0)) };
+    }
+}
+
 fn wanted() -> Option<Border> {
     *WANTED.lock().unwrap_or_else(|e| e.into_inner())
 }
