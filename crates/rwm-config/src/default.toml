@@ -13,6 +13,11 @@
 default_layout = "dwindle"
 # Layouts "cycle-layout" (Win+Space) steps through, in order.
 layout_cycle = ["dwindle", "master", "monocle"]
+# Master layout: how many windows share the master area ("master-count +1"
+# / "-1" change it live) and which side it is on: "left", "right", "top" or
+# "bottom" ("master-side next" goes round).
+master_count = 1
+master_side = "left"
 # Where new windows go: "after-focused" splits the focused window in half
 # (like Hyprland), "end" / "start" split the last / first window.
 new_window = "after-focused"
@@ -61,6 +66,33 @@ smart = true   # no gaps when a workspace has a single window
 [animation]
 enabled = true
 duration_ms = 200    # 0 to 1000
+
+# Keep space free at the monitor edges, e.g. for a status bar (pixels at
+# 100% scale).
+[work_area_offset]
+top = 0
+bottom = 0
+left = 0
+right = 0
+
+# A tab bar over every stack ("stack <dir>"), listing its windows; click a
+# tab to show that window.
+[stackbar]
+enabled = true
+height = 28                 # pixels at 100% scale, 8 to 100
+active_color = "#89b4fa"    # the shown window's tab
+inactive_color = "#313244"
+text_color = "#cdd6f4"
+
+# Window swallowing (like Hyprland): an app started from one of these
+# terminals takes the terminal's tile, and the terminal comes back when the
+# app closes. Names are regexes matching the whole exe name, any case.
+[swallow]
+enabled = false
+terminals = ["WindowsTerminal\\.exe", "wezterm-gui\\.exe", "alacritty\\.exe", "kitty\\.exe",
+             "ghostty\\.exe", "rio\\.exe", "conhost\\.exe", "OpenConsole\\.exe", "cmd\\.exe",
+             "powershell\\.exe", "pwsh\\.exe"]
+exceptions = []
 
 # A coloured frame drawn just inside the focused window's edge.
 [border]

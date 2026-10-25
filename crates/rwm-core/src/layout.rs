@@ -43,25 +43,81 @@ pub const DEFAULT_RATIO: f32 = 0.5;
 pub const MIN_RATIO: f32 = 0.1;
 pub const MAX_RATIO: f32 = 0.9;
 
-/// Per-split ratio overrides from resizing. Split `i` is the one that gives
-/// window `i` its share of the remaining space. Missing entries mean 0.5.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Ratios(pub Vec<f32>);
+/// Per-split ratio overrides from resizing, plus the master layout's
+/// settings. Split `i` is the one that gives window `i` its share of the
+/// remaining space. Missing entries mean 0.5.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ratios {
+    pub splits: Vec<f32>,
+    /// How many windows share the master area (Hyprland's `nmaster`).
+    pub master_count: usize,
+    /// Which side of the screen the master area is on.
+    pub master_side: Side,
+}
+
+impl Default for Ratios {
+    fn default() -> Self {
+        Self {
+            splits: Vec::new(),
+            master_count: 1,
+            master_side: Side::Left,
+        }
+    }
+}
 
 impl Ratios {
     pub fn get(&self, split: usize) -> f32 {
-        self.0.get(split).copied().unwrap_or(DEFAULT_RATIO)
+        self.splits.get(split).copied().unwrap_or(DEFAULT_RATIO)
     }
 
     pub fn set(&mut self, split: usize, ratio: f32) {
-        if self.0.len() <= split {
-            self.0.resize(split + 1, DEFAULT_RATIO);
+        if self.splits.len() <= split {
+            self.splits.resize(split + 1, DEFAULT_RATIO);
         }
-        self.0[split] = ratio.clamp(MIN_RATIO, MAX_RATIO);
+        self.splits[split] = ratio.clamp(MIN_RATIO, MAX_RATIO);
     }
 
+    /// Forgets the resized ratios; the master settings stay.
     pub fn reset(&mut self) {
-        self.0.clear();
+        self.splits.clear();
+    }
+}
+
+/// A side of the work area, for the master layout's orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    #[default]
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Side {
+    pub const ALL: [Side; 4] = [Side::Left, Side::Right, Side::Top, Side::Bottom];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
+            Side::Top => "top",
+            Side::Bottom => "bottom",
+        }
+    }
+}
+
+impl std::str::FromStr for Side {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL.into_iter().find(|x| x.name() == s).ok_or(())
+    }
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -167,7 +223,8 @@ impl LayoutKind {
             // the second part of the final split.
             LayoutKind::Dwindle if index < count - 1 => (index, 1.0),
             LayoutKind::Dwindle => (count - 2, -1.0),
-            LayoutKind::Master if index == 0 => (0, 1.0),
+            LayoutKind::Master if count <= ratios.master_count.max(1) => return false,
+            LayoutKind::Master if index < ratios.master_count.max(1) => (0, 1.0),
             LayoutKind::Master => (0, -1.0),
         };
         ratios.set(split, ratios.get(split) + sign * delta);
@@ -320,22 +377,41 @@ fn rows(count: usize, r: Rect, gap: i32) -> Vec<Rect> {
         .collect()
 }
 
+/// The first `ratios.master_count` windows share the master area on
+/// `ratios.master_side` at the master ratio; the rest split the other part.
 pub fn master(count: usize, area: Rect, gaps: Gaps, ratios: &Ratios) -> Vec<Rect> {
+    let (n, side) = (ratios.master_count.max(1), ratios.master_side);
     let gaps = effective_gaps(count, gaps);
     let area = area.inset(gaps.outer);
-    match count {
-        0 => Vec::new(),
-        1 => vec![area],
-        _ => {
-            let usable = (area.w - gaps.inner).max(0);
-            let mw = (usable as f32 * ratios.get(0)).round() as i32;
-            let main = Rect::new(area.x, area.y, mw, area.h);
-            let stack = Rect::new(area.x + mw + gaps.inner, area.y, usable - mw, area.h);
-            let mut out = vec![main];
-            out.extend(rows(count - 1, stack, gaps.inner));
-            out
+    // Lay out masters-on-the-left in a (possibly transposed) frame, then
+    // map the rects back.
+    let transposed = matches!(side, Side::Top | Side::Bottom);
+    let t = |r: Rect| {
+        if transposed {
+            Rect::new(r.y, r.x, r.h, r.w)
+        } else {
+            r
+        }
+    };
+    let frame = t(area);
+    let mut out = if count <= n {
+        rows(count, frame, gaps.inner)
+    } else {
+        let usable = (frame.w - gaps.inner).max(0);
+        let mw = (usable as f32 * ratios.get(0)).round() as i32;
+        let main = Rect::new(frame.x, frame.y, mw, frame.h);
+        let stack = Rect::new(frame.x + mw + gaps.inner, frame.y, usable - mw, frame.h);
+        let mut out = rows(n, main, gaps.inner);
+        out.extend(rows(count - n, stack, gaps.inner));
+        out
+    };
+    for r in &mut out {
+        *r = t(*r);
+        if matches!(side, Side::Right | Side::Bottom) {
+            *r = flip(*r, area, side == Side::Right, side == Side::Bottom);
         }
     }
+    out
 }
 
 pub fn monocle(count: usize, area: Rect, gaps: Gaps) -> Vec<Rect> {
@@ -386,7 +462,12 @@ pub fn grid(count: usize, area: Rect, gaps: Gaps) -> Vec<Rect> {
 /// left and the rest in rows on its right. Two windows split like `master`.
 pub fn center(count: usize, area: Rect, gaps: Gaps, ratios: &Ratios) -> Vec<Rect> {
     if count < 3 {
-        return master(count, area, gaps, ratios);
+        let ratios = Ratios {
+            master_count: 1,
+            master_side: Side::Left,
+            ..ratios.clone()
+        };
+        return master(count, area, gaps, &ratios);
     }
     let gaps = effective_gaps(count, gaps);
     let area = area.inset(gaps.outer);
@@ -532,6 +613,48 @@ mod tests {
             ]
         );
         assert_eq!(master(1, AREA, NO_GAPS, &Ratios::default()), vec![AREA]);
+    }
+
+    #[test]
+    fn master_count_and_side() {
+        let area = Rect::new(0, 0, 1000, 800);
+        let mut r = Ratios {
+            master_count: 2,
+            ..Ratios::default()
+        };
+        assert_eq!(
+            master(3, area, NO_GAPS, &r),
+            vec![
+                Rect::new(0, 0, 500, 400),
+                Rect::new(0, 400, 500, 400),
+                Rect::new(500, 0, 500, 800),
+            ]
+        );
+        // All masters: they share the whole area.
+        assert_eq!(
+            master(2, area, NO_GAPS, &r),
+            vec![Rect::new(0, 0, 1000, 400), Rect::new(0, 400, 1000, 400)]
+        );
+        r.master_count = 1;
+        r.master_side = Side::Right;
+        assert_eq!(
+            master(2, area, NO_GAPS, &r),
+            vec![Rect::new(500, 0, 500, 800), Rect::new(0, 0, 500, 800)]
+        );
+        r.master_side = Side::Top;
+        assert_eq!(
+            master(3, area, NO_GAPS, &r),
+            vec![
+                Rect::new(0, 0, 1000, 400),
+                Rect::new(0, 400, 500, 400),
+                Rect::new(500, 400, 500, 400),
+            ]
+        );
+        r.master_side = Side::Bottom;
+        assert_eq!(
+            master(2, area, NO_GAPS, &r)[0],
+            Rect::new(0, 400, 1000, 400)
+        );
     }
 
     #[test]

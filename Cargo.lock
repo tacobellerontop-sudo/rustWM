@@ -394,6 +394,7 @@ dependencies = [
 name = "rwm-config"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "rwm-core",
  "serde",
  "thiserror",

@@ -48,6 +48,23 @@ pub struct Border {
     pub color: u32,
 }
 
+/// A tab bar over a stacked tile, listing the stack's windows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stackbar {
+    /// Where the bar goes, physical pixels.
+    pub rect: Rect,
+    /// The stack's windows and their titles, in order.
+    pub tabs: Vec<(WindowHandle, String)>,
+    /// Index of the shown window in `tabs`.
+    pub active: usize,
+    /// Whether the stack holds the focused window.
+    pub focused: bool,
+    /// Colours (0xRRGGBB): the shown tab, the others, and the text.
+    pub active_color: u32,
+    pub inactive_color: u32,
+    pub text_color: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
     #[error("window {0:?} no longer exists")]
@@ -122,4 +139,23 @@ pub trait Platform {
     fn set_opacity(&mut self, _handle: WindowHandle, _alpha: u8) -> Result<()> {
         Ok(())
     }
+
+    /// Minimizes a window.
+    fn minimize(&mut self, _handle: WindowHandle) -> Result<()> {
+        Ok(())
+    }
+
+    /// The id of the process that owns a window.
+    fn process_id(&self, _handle: WindowHandle) -> Option<u32> {
+        None
+    }
+
+    /// The ids of a process's parent, grandparent and so on, nearest first.
+    fn ancestor_pids(&self, _pid: u32) -> Vec<u32> {
+        Vec::new()
+    }
+
+    /// Draws these stack tab bars, replacing any drawn before. Clicking a tab
+    /// should send the command `focus-window <handle>`.
+    fn set_stackbars(&mut self, _bars: &[Stackbar]) {}
 }

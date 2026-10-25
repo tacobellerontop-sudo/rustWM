@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::platform::{PlatformOptions, Result};
+use crate::platform::{PlatformOptions, Result, Stackbar};
 use crate::{Border, MonitorInfo, Platform, PlatformError, Rect, WindowHandle, WindowInfo};
 
 /// One call the core made into the platform.
@@ -19,6 +19,7 @@ pub enum Call {
     FocusDesktop,
     Close(WindowHandle),
     Spawn(String),
+    Minimize(WindowHandle),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -41,6 +42,12 @@ pub struct FakePlatform {
     pub opacity: BTreeMap<WindowHandle, u8>,
     /// Options from the last `configure`.
     pub options: Option<PlatformOptions>,
+    /// The process of each window that has one.
+    pub pids: BTreeMap<WindowHandle, u32>,
+    /// Each process's parent.
+    pub parents: BTreeMap<u32, u32>,
+    /// The stack tab bars as last drawn.
+    pub stackbars: Vec<Stackbar>,
 }
 
 impl FakePlatform {
@@ -227,5 +234,32 @@ impl Platform for FakePlatform {
             self.opacity.insert(handle, alpha);
         }
         Ok(())
+    }
+
+    fn minimize(&mut self, handle: WindowHandle) -> Result<()> {
+        self.calls.push(Call::Minimize(handle));
+        self.get_mut(handle)?.minimized = true;
+        Ok(())
+    }
+
+    fn process_id(&self, handle: WindowHandle) -> Option<u32> {
+        self.pids.get(&handle).copied()
+    }
+
+    fn ancestor_pids(&self, pid: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut p = pid;
+        while let Some(&parent) = self.parents.get(&p) {
+            if out.contains(&parent) {
+                break;
+            }
+            out.push(parent);
+            p = parent;
+        }
+        out
+    }
+
+    fn set_stackbars(&mut self, bars: &[Stackbar]) {
+        self.stackbars = bars.to_vec();
     }
 }

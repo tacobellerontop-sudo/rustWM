@@ -7,7 +7,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::geometry::Direction;
-use crate::layout::LayoutKind;
+use crate::layout::{LayoutKind, Side};
 use crate::workspace::WorkspaceMode;
 
 /// The special workspace `toggle-special` uses when no name is given.
@@ -70,6 +70,11 @@ pub enum Command {
     ToggleSplit,
     /// Forget all resize ratios on the focused workspace.
     LayoutReset,
+    /// `master-count +1|-1|<n>`: how many windows share the master area.
+    MasterCount(Count),
+    /// `master-side left|right|top|bottom|next`: where the master area is;
+    /// `None` (`next`) goes round the sides.
+    MasterSide(Option<Side>),
     /// `resize grow|shrink [amount]`: grow (positive) or shrink the focused
     /// window's share of its split.
     Resize(f32),
@@ -89,6 +94,12 @@ pub enum Command {
     TogglePin,
     /// Centre the focused floating window on its monitor.
     Center,
+    /// Minimize the focused window (it stops being managed until restored).
+    Minimize,
+    /// `focus-window <handle|exe:regex|title:regex|class:regex>`: focus a
+    /// window anywhere, switching workspace or stack tab to show it. With
+    /// several matches, the next one after the focused window.
+    FocusWindow(String),
     /// `stack <dir>`: put the focused window in the same tile as its
     /// neighbour; only one window of a stack shows at a time.
     Stack(Direction),
@@ -115,6 +126,23 @@ pub enum Command {
     Restore,
     /// Restore all windows and exit.
     Quit,
+}
+
+/// A new value for a count: relative or absolute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Count {
+    By(i32),
+    To(usize),
+}
+
+impl Count {
+    /// Applies the change to `n`, staying at least 1.
+    pub fn apply(self, n: usize) -> usize {
+        match self {
+            Count::By(d) => (n as i64 + d as i64).max(1) as usize,
+            Count::To(v) => v.max(1),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +276,40 @@ fn resize(rest: &str) -> Result<Command, ParseError> {
     Ok(Command::Resize(sign * amount))
 }
 
+fn count(cmd: &'static str, rest: &str) -> Result<Count, ParseError> {
+    let parsed = if rest.starts_with(['+', '-']) {
+        rest.parse::<i32>().ok().filter(|d| *d != 0).map(Count::By)
+    } else {
+        rest.parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .map(Count::To)
+    };
+    parsed.ok_or_else(|| ParseError::BadArgument {
+        cmd,
+        expected: "+N, -N or a number of at least 1",
+        got: rest.into(),
+    })
+}
+
+/// Checks a `focus-window` query: a window handle, or `exe:`, `title:` or
+/// `class:` followed by a pattern.
+fn window_query(rest: &str) -> Result<String, ParseError> {
+    let ok = rest.parse::<isize>().is_ok()
+        || ["exe:", "title:", "class:"]
+            .iter()
+            .any(|p| rest.strip_prefix(p).is_some_and(|re| !re.is_empty()));
+    if ok {
+        Ok(rest.into())
+    } else {
+        Err(ParseError::BadArgument {
+            cmd: "focus-window",
+            expected: "a window handle, exe:<pattern>, title:<pattern> or class:<pattern>",
+            got: rest.into(),
+        })
+    }
+}
+
 fn no_arg(cmd: &'static str, rest: &str, c: Command) -> Result<Command, ParseError> {
     if rest.is_empty() {
         Ok(c)
@@ -317,6 +379,18 @@ impl FromStr for Command {
                     got: rest.into(),
                 }),
             },
+            "master-count" => count("master-count", rest).map(Command::MasterCount),
+            "master-side" if rest == "next" => Ok(Command::MasterSide(None)),
+            "master-side" => rest
+                .parse()
+                .map(|s| Command::MasterSide(Some(s)))
+                .map_err(|()| ParseError::BadArgument {
+                    cmd: "master-side",
+                    expected: "left, right, top, bottom or next",
+                    got: rest.into(),
+                }),
+            "minimize" => no_arg("minimize", rest, Command::Minimize),
+            "focus-window" => window_query(rest).map(Command::FocusWindow),
             "toggle-split" => no_arg("toggle-split", rest, Command::ToggleSplit),
             "resize" => resize(rest),
             "toggle-float" => no_arg("toggle-float", rest, Command::ToggleFloat),
@@ -387,6 +461,12 @@ impl fmt::Display for Command {
             Command::CycleLayout(_) => f.write_str("cycle-layout"),
             Command::FlipLayout(a) => write!(f, "flip-layout {}", a.name()),
             Command::ToggleSplit => f.write_str("toggle-split"),
+            Command::MasterCount(Count::By(d)) => write!(f, "master-count {d:+}"),
+            Command::MasterCount(Count::To(n)) => write!(f, "master-count {n}"),
+            Command::MasterSide(Some(s)) => write!(f, "master-side {s}"),
+            Command::MasterSide(None) => f.write_str("master-side next"),
+            Command::Minimize => f.write_str("minimize"),
+            Command::FocusWindow(q) => write!(f, "focus-window {q}"),
             Command::LayoutReset => f.write_str("layout reset"),
             Command::Resize(d) if *d >= 0.0 => write!(f, "resize grow {d}"),
             Command::Resize(d) => write!(f, "resize shrink {}", -d),
@@ -480,6 +560,15 @@ mod tests {
             "toggle-pause",
             "manage",
             "unmanage",
+            "master-count +1",
+            "master-count -1",
+            "master-count 2",
+            "master-side top",
+            "master-side next",
+            "minimize",
+            "focus-window 1234",
+            "focus-window exe:firefox\\.exe",
+            "focus-window title:^Inbox",
         ] {
             assert_eq!(parse(s).to_string(), s);
         }
@@ -525,6 +614,14 @@ mod tests {
             "stack next",
             "cycle-stack sideways",
             "swap-workspaces",
+            "master-count",
+            "master-count 0",
+            "master-count +0",
+            "master-count many",
+            "master-side middle",
+            "focus-window",
+            "focus-window firefox",
+            "focus-window exe:",
         ] {
             assert!(
                 matches!(bad.parse::<Command>(), Err(ParseError::BadArgument { .. })),

@@ -24,6 +24,8 @@ mod opacity;
 #[cfg(windows)]
 mod platform;
 #[cfg(windows)]
+mod stackbar;
+#[cfg(windows)]
 mod tray;
 #[cfg(windows)]
 pub mod user_path;

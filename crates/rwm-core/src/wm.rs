@@ -2,10 +2,12 @@ use std::collections::{BTreeSet, HashMap};
 
 use tracing::{debug, info, warn};
 
+use regex::Regex;
+
 use crate::command::{Axis, Command, DEFAULT_PIXEL_STEP, SPECIAL_PREFIX, Target};
 use crate::geometry::Direction;
-use crate::layout::{self, Gaps, LayoutKind};
-use crate::platform::{HideMethod, PlatformOptions};
+use crate::layout::{self, Gaps, LayoutKind, Side};
+use crate::platform::{HideMethod, MonitorInfo, PlatformOptions, Stackbar};
 use crate::rules::{self, Rule, Verdict};
 use crate::state::{MonitorState, State, WindowState, WorkspaceState};
 use crate::tree::Mins;
@@ -42,6 +44,52 @@ impl Default for BorderSettings {
     }
 }
 
+/// The tab bars drawn over stacked tiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackbarSettings {
+    pub enabled: bool,
+    /// Height at 100% scaling; scaled per monitor.
+    pub height: i32,
+    /// 0xRRGGBB colours of the shown tab, the other tabs and the text.
+    pub active_color: u32,
+    pub inactive_color: u32,
+    pub text_color: u32,
+}
+
+impl Default for StackbarSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            height: 28,
+            active_color: 0x89b4fa,
+            inactive_color: 0x313244,
+            text_color: 0xcdd6f4,
+        }
+    }
+}
+
+/// Window swallowing: an app started from a terminal takes the terminal's
+/// tile, and the terminal comes back when the app closes.
+#[derive(Debug, Clone, Default)]
+pub struct SwallowSettings {
+    pub enabled: bool,
+    /// Executables that swallow the windows they start (whole name,
+    /// case-insensitive).
+    pub terminals: Option<Regex>,
+    /// Executables that are never swallowed.
+    pub exceptions: Option<Regex>,
+}
+
+/// Space kept free at the edges of every monitor's work area (for a status
+/// bar, say), in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Offsets {
+    pub top: i32,
+    pub bottom: i32,
+    pub left: i32,
+    pub right: i32,
+}
+
 /// Per-workspace settings that override the general ones, by workspace name.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorkspaceOverride {
@@ -68,6 +116,14 @@ pub struct Settings {
     pub workspace_back_and_forth: bool,
     /// The layouts `cycle-layout` goes through, in order.
     pub layout_cycle: Vec<LayoutKind>,
+    /// How many windows the master layout puts in the master area.
+    pub master_count: usize,
+    /// Where the master layout puts the master area.
+    pub master_side: Side,
+    /// Space kept free at the edges of the work area.
+    pub work_area_offset: Offsets,
+    pub swallow: SwallowSettings,
+    pub stackbar: StackbarSettings,
     /// Opacity of windows without focus, 0.1 to 1.0 (1.0 leaves them alone).
     pub inactive_opacity: f32,
     /// How windows of inactive workspaces are hidden.
@@ -96,6 +152,11 @@ impl Default for Settings {
             mouse_follows_focus: false,
             workspace_back_and_forth: false,
             layout_cycle: LayoutKind::DEFAULT_CYCLE.to_vec(),
+            master_count: 1,
+            master_side: Side::Left,
+            work_area_offset: Offsets::default(),
+            swallow: SwallowSettings::default(),
+            stackbar: StackbarSettings::default(),
             inactive_opacity: 1.0,
             hide_method: HideMethod::default(),
             animation_ms: DEFAULT_ANIMATION_MS,
@@ -196,6 +257,11 @@ pub struct Wm<P: Platform> {
     paused: bool,
     /// Opacity we set on windows, when not opaque.
     opacity: HashMap<WindowHandle, u8>,
+    /// Stacked tiles that get a tab bar: the bar's rect, the stack's
+    /// workspace and the stack's shown window. Worked out by `apply`.
+    bar_slots: Vec<(Rect, Loc, WindowHandle)>,
+    /// The tab bars as last drawn.
+    stackbars: Vec<Stackbar>,
 }
 
 impl<P: Platform> Wm<P> {
@@ -228,6 +294,8 @@ impl<P: Platform> Wm<P> {
             pinned: BTreeSet::new(),
             paused: false,
             opacity: HashMap::new(),
+            bar_slots: Vec::new(),
+            stackbars: Vec::new(),
         }
     }
 
@@ -236,8 +304,7 @@ impl<P: Platform> Wm<P> {
     pub fn start(&mut self) -> crate::platform::Result<()> {
         let layout = self.settings.default_layout;
         self.monitors = self
-            .platform
-            .monitors()?
+            .read_monitors()?
             .into_iter()
             .map(|m| {
                 info!(id = %m.id, work_area = ?m.work_area, scale = m.scale, "monitor");
@@ -282,6 +349,7 @@ impl<P: Platform> Wm<P> {
         self.apply();
         self.update_border();
         self.update_opacity();
+        self.update_stackbars();
         for line in self.settings.exec_on_start.clone() {
             if let Err(e) = self.platform.spawn(&line) {
                 warn!(command = %line, error = %e, "exec_on_start failed");
@@ -298,7 +366,26 @@ impl<P: Platform> Wm<P> {
             if let Some(layout) = overrides.get(&ws.name).and_then(|o| o.layout) {
                 ws.layout = layout;
             }
+            ws.ratios.master_count = self.settings.master_count.max(1);
+            ws.ratios.master_side = self.settings.master_side;
         }
+    }
+
+    /// The monitors, with `work_area_offset` taken off their work areas.
+    fn read_monitors(&self) -> crate::platform::Result<Vec<MonitorInfo>> {
+        let o = self.settings.work_area_offset;
+        let mut monitors = self.platform.monitors()?;
+        if o != Offsets::default() {
+            for m in &mut monitors {
+                let s = |v: i32| (v as f32 * m.scale).round() as i32;
+                let a = m.work_area;
+                let (l, t) = (s(o.left), s(o.top));
+                let w = (a.w - l - s(o.right)).max(1);
+                let h = (a.h - t - s(o.bottom)).max(1);
+                m.work_area = Rect::new(a.x + l, a.y + t, w, h);
+            }
+        }
+        Ok(monitors)
     }
 
     /// The gaps of a workspace at a monitor's scale.
@@ -316,7 +403,11 @@ impl<P: Platform> Wm<P> {
         let layout = settings.default_layout;
         let names = settings.workspaces.clone();
         self.platform.configure(platform_options(&settings));
+        let offset_changed = settings.work_area_offset != self.settings.work_area_offset;
         self.settings = settings;
+        if offset_changed && !self.monitors.is_empty() {
+            self.refresh_monitors();
+        }
         for mi in 0..self.monitors.len() {
             self.resize_workspaces(mi, &names, layout);
             self.apply_workspace_layouts(mi);
@@ -331,9 +422,12 @@ impl<P: Platform> Wm<P> {
         if flow == Flow::Exit {
             self.border = None;
             self.platform.set_border(None);
+            self.stackbars.clear();
+            self.platform.set_stackbars(&[]);
         } else {
             self.update_border();
             self.update_opacity();
+            self.update_stackbars();
         }
         flow
     }
@@ -504,6 +598,19 @@ impl<P: Platform> Wm<P> {
                 ws.ratios.reset();
                 ws.tree.reset();
             }
+            Command::MasterCount(c) => {
+                let r = &mut self.current_ws_mut().ratios;
+                r.master_count = c.apply(r.master_count);
+            }
+            Command::MasterSide(side) => {
+                let r = &mut self.current_ws_mut().ratios;
+                r.master_side = side.unwrap_or_else(|| {
+                    let i = Side::ALL.iter().position(|s| *s == r.master_side);
+                    Side::ALL[i.map_or(0, |i| (i + 1) % Side::ALL.len())]
+                });
+            }
+            Command::Minimize => self.minimize(),
+            Command::FocusWindow(query) => self.focus_matching(&query),
             Command::Resize(delta) => self.resize(delta),
             Command::ResizeEdge(dir, px) => self.resize_edge(dir, px),
             Command::ToggleFloat => self.toggle_float(),
@@ -801,10 +908,29 @@ impl<P: Platform> Wm<P> {
             .monitor
             .filter(|m| *m < self.monitors.len())
             .unwrap_or(self.focused_monitor);
+        let swallower = if verdict.float || !w.resizable {
+            None
+        } else {
+            self.swallower(&w)
+        };
         if let Some(loc) = self.place(h, monitor, &verdict, pos) {
             self.meta.insert(h, Meta::from(&w));
             if self.is_visible(loc) {
                 self.ws_mut(loc).focused = Some(h);
+            }
+            if let Some(size) = verdict.size {
+                let mi = match loc {
+                    Loc::Ws { monitor, .. } => monitor,
+                    Loc::Special(_) => self.special_shown.map_or(monitor, |(_, m)| m),
+                };
+                let size = (self.pixels(mi, size.0), self.pixels(mi, size.1));
+                self.place_centred(h, mi, size);
+                return;
+            }
+            if let Some(t) = swallower.filter(|t| self.locate(*t) == Some(loc)) {
+                info!(handle = ?h, terminal = ?t, "swallowing terminal");
+                self.ws_mut(loc).stack_onto(h, t);
+                return;
             }
             // Known not to fit even after the layout made room: float it now,
             // instead of tiling it and floating it once it refuses its slot.
@@ -814,6 +940,36 @@ impl<P: Platform> Wm<P> {
                 self.float_centred(h, loc, (size.0.max(w.rect.w), size.1.max(w.rect.h)));
             }
         }
+    }
+
+    /// The terminal window that started `w`'s process, if swallowing is on
+    /// and it is tiled where the new window will go. The focused window is
+    /// tried first.
+    fn swallower(&self, w: &WindowInfo) -> Option<WindowHandle> {
+        let s = &self.settings.swallow;
+        let terminals = s.terminals.as_ref().filter(|_| s.enabled)?;
+        if s.exceptions.as_ref().is_some_and(|re| re.is_match(&w.exe)) || terminals.is_match(&w.exe)
+        {
+            return None;
+        }
+        let ancestors = self
+            .platform
+            .ancestor_pids(self.platform.process_id(w.handle)?);
+        if ancestors.is_empty() {
+            return None;
+        }
+        let ws = self.ws(self.current_loc());
+        let focused = ws.focused.filter(|h| ws.tiled.contains(h));
+        focused
+            .into_iter()
+            .chain(ws.tiled.iter().copied())
+            .find(|t| {
+                self.meta.get(t).is_some_and(|m| terminals.is_match(&m.exe))
+                    && self
+                        .platform
+                        .process_id(*t)
+                        .is_some_and(|pid| ancestors.contains(&pid))
+            })
     }
 
     /// Whether tiled window `h` gets at least its minimum size where the
@@ -1261,7 +1417,7 @@ impl<P: Platform> Wm<P> {
     }
 
     fn refresh_monitors(&mut self) {
-        let infos = match self.platform.monitors() {
+        let infos = match self.read_monitors() {
             Ok(m) if !m.is_empty() => m,
             Ok(_) => return,
             Err(e) => {
@@ -1961,6 +2117,93 @@ impl<P: Platform> Wm<P> {
         self.pinned.insert(h);
     }
 
+    /// `minimize`: minimizes the focused window and stops managing it (it
+    /// comes back when restored), focusing the next window.
+    fn minimize(&mut self) {
+        let Some(h) = self.focused() else {
+            return;
+        };
+        if let Err(e) = self.platform.minimize(h) {
+            warn!(handle = ?h, error = %e, "minimize failed");
+            return;
+        }
+        let loc = self.current_loc();
+        self.unmanage(h);
+        let next = self.ws(loc).focused;
+        self.focus_or_desktop(next);
+    }
+
+    /// `focus-window <query>`: focuses the first window after the focused
+    /// one that matches, on any workspace, showing its workspace or stack tab.
+    fn focus_matching(&mut self, query: &str) {
+        let handle = query.parse().ok().map(WindowHandle);
+        let pattern = match handle {
+            Some(_) => None,
+            None => {
+                let (field, pattern) = query.split_once(':').unwrap_or(("title", query));
+                match regex::RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                {
+                    Ok(re) => Some((field, re)),
+                    Err(e) => {
+                        warn!(query, error = %e, "bad focus-window pattern");
+                        return;
+                    }
+                }
+            }
+        };
+        let matches = |h: WindowHandle, m: &Meta| match &pattern {
+            None => Some(h) == handle,
+            Some(("exe", re)) => re.is_match(&m.exe),
+            Some(("class", re)) => re.is_match(&m.class),
+            Some((_, re)) => re.is_match(&m.title),
+        };
+        let all: Vec<_> = self.all_windows().collect();
+        let start = self
+            .focused()
+            .and_then(|f| all.iter().position(|h| *h == f))
+            .map_or(0, |i| i + 1);
+        let found = (0..all.len())
+            .map(|i| all[(start + i) % all.len()])
+            .find(|h| {
+                let meta = self.meta.get(h).cloned().unwrap_or_default();
+                matches(*h, &meta)
+            });
+        let Some(h) = found else {
+            debug!(query, "no window matches");
+            return;
+        };
+        self.show_window(h);
+        self.focus_window(h);
+    }
+
+    /// Makes managed window `h` visible: switches its monitor to its
+    /// workspace (or shows its special workspace) and brings it to the front
+    /// of its stack.
+    fn show_window(&mut self, h: WindowHandle) {
+        let Some(loc) = self.locate(h) else {
+            return;
+        };
+        if !self.is_visible(loc) {
+            match loc {
+                Loc::Ws { monitor, workspace } => {
+                    self.ws_mut(loc).focused = Some(h);
+                    self.switch_to(monitor, workspace);
+                }
+                Loc::Special(i) => {
+                    let name = self.specials[i].name.clone();
+                    self.toggle_special(&name);
+                }
+            }
+        }
+        let ws = self.ws_mut(loc);
+        if ws.stack_of(h).is_some() && !ws.tiled.contains(&h) {
+            ws.bring_to_front(h);
+        }
+        self.apply();
+    }
+
     /// Places `h` at `size` (at most the work area) in the middle of monitor `mi`.
     fn place_centred(&mut self, h: WindowHandle, mi: usize, size: (i32, i32)) {
         let area = self.monitors[mi].info.work_area;
@@ -2089,29 +2332,33 @@ impl<P: Platform> Wm<P> {
         // Show the new front of a stack before hiding the old one.
         self.reveal_slots();
         let mut slots = Vec::new();
-        for m in &self.monitors {
+        let mut bars = Vec::new();
+        for (mi, m) in self.monitors.iter().enumerate() {
             let gaps = self.gaps_for(m.workspace(), m.info.scale);
-            slots.extend(arrange(
+            let mut ws_slots = arrange(
                 m.workspace(),
                 m.info.work_area,
                 m.info.rect,
                 gaps,
                 &self.mins,
-            ));
+            );
+            let loc = Loc::Ws {
+                monitor: mi,
+                workspace: m.active,
+            };
+            self.carve_stackbars(loc, m.info.scale, &mut ws_slots, &mut bars);
+            slots.extend(ws_slots);
         }
         if let Some((i, mi)) = self.special_shown {
             if let Some(m) = self.monitors.get(mi) {
                 let overlay = special_overlay(m.info.work_area);
                 let gaps = self.gaps_for(&self.specials[i], m.info.scale);
-                slots.extend(arrange(
-                    &self.specials[i],
-                    overlay,
-                    overlay,
-                    gaps,
-                    &self.mins,
-                ));
+                let mut ws_slots = arrange(&self.specials[i], overlay, overlay, gaps, &self.mins);
+                self.carve_stackbars(Loc::Special(i), m.info.scale, &mut ws_slots, &mut bars);
+                slots.extend(ws_slots);
             }
         }
+        self.bar_slots = bars;
         let moves: Vec<_> = slots
             .into_iter()
             .filter(|(h, r)| self.applied.get(h) != Some(r))
@@ -2126,6 +2373,80 @@ impl<P: Platform> Wm<P> {
             }
         }
         self.hide_stacked();
+    }
+
+    /// Takes a tab bar's height off the top of every stacked tile of the
+    /// workspace at `loc`, and notes where the bars go in `bars`.
+    fn carve_stackbars(
+        &self,
+        loc: Loc,
+        scale: f32,
+        slots: &mut [(WindowHandle, Rect)],
+        bars: &mut Vec<(Rect, Loc, WindowHandle)>,
+    ) {
+        let sb = self.settings.stackbar;
+        if !sb.enabled || sb.height <= 0 {
+            return;
+        }
+        let ws = self.ws(loc);
+        let height = ((sb.height as f32 * scale).round() as i32).max(1);
+        for (h, r) in slots.iter_mut() {
+            if ws.fullscreen == Some(*h) || ws.maximized == Some(*h) || r.h <= height * 2 {
+                continue;
+            }
+            if ws.stack_of(*h).is_some_and(|si| ws.stacks[si].len() > 1) {
+                bars.push((Rect::new(r.x, r.y, r.w, height), loc, *h));
+                *r = Rect::new(r.x, r.y + height, r.w, r.h - height);
+            }
+        }
+    }
+
+    /// Draws the tab bars `apply` worked out, with current titles, if they
+    /// changed.
+    fn update_stackbars(&mut self) {
+        let sb = self.settings.stackbar;
+        let want: Vec<Stackbar> = if self.paused {
+            Vec::new()
+        } else {
+            self.bar_slots
+                .iter()
+                .filter_map(|&(rect, loc, front)| {
+                    // Monitors or workspaces may have gone since `apply`.
+                    if let Loc::Ws { monitor, workspace } = loc {
+                        self.monitors.get(monitor)?.workspaces.get(workspace)?;
+                    }
+                    let ws = self.ws(loc);
+                    let stack = &ws.stacks[ws.stack_of(front)?];
+                    let tabs = stack
+                        .iter()
+                        .map(|h| {
+                            let m = self.meta.get(h);
+                            let title = m.map_or(String::new(), |m| {
+                                if m.title.is_empty() {
+                                    m.exe.clone()
+                                } else {
+                                    m.title.clone()
+                                }
+                            });
+                            (*h, title)
+                        })
+                        .collect();
+                    Some(Stackbar {
+                        rect,
+                        tabs,
+                        active: stack.iter().position(|h| *h == front)?,
+                        focused: self.focused().is_some_and(|f| stack.contains(&f)),
+                        active_color: sb.active_color,
+                        inactive_color: sb.inactive_color,
+                        text_color: sb.text_color,
+                    })
+                })
+                .collect()
+        };
+        if want != self.stackbars {
+            self.platform.set_stackbars(&want);
+            self.stackbars = want;
+        }
     }
 
     /// Hides a window and remembers that we did, so [`Wm::restore`] can undo it.

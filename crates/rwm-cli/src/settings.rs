@@ -114,6 +114,24 @@ const SETTINGS: &[Setting] = &[
         kind: Kind::Bool,
     },
     Setting {
+        label: "Master area side",
+        section: "general",
+        key: "master_side",
+        kind: Kind::Choice(&["left", "right", "top", "bottom"]),
+    },
+    Setting {
+        label: "Tab bar over stacks",
+        section: "stackbar",
+        key: "enabled",
+        kind: Kind::Bool,
+    },
+    Setting {
+        label: "Apps swallow their terminal",
+        section: "swallow",
+        key: "enabled",
+        kind: Kind::Bool,
+    },
+    Setting {
         label: "Hotkey daemon (applies on restart)",
         section: "general",
         key: "hotkeys",
@@ -148,6 +166,9 @@ fn current(s: &Setting, loaded: &rwm_config::Loaded) -> String {
         ("gaps", "inner") => cfg.gaps.inner.to_string(),
         ("gaps", "outer") => cfg.gaps.outer.to_string(),
         ("gaps", "smart") => on_off(cfg.gaps.smart),
+        ("general", "master_side") => cfg.master_side.to_string(),
+        ("stackbar", "enabled") => on_off(cfg.stackbar.enabled),
+        ("swallow", "enabled") => on_off(cfg.swallow.enabled),
         _ => String::new(),
     }
 }
