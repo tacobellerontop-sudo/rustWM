@@ -2,8 +2,11 @@
 
 A keyboard-driven, dynamic tiling window manager for Windows 10/11, written in Rust.
 Inspired by komorebi and Hyprland: windows sit in an ordered list per workspace and a
-layout (dwindle, master-stack, monocle) computes where they go. One TOML config, built-in
-hotkeys, and an `rwm` CLI over a named pipe.
+layout (dwindle, master-stack, monocle, columns, rows, grid, centred master) computes
+where they go. Windows can share a tile as a stack, float, pin, maximize or go fullscreen.
+One TOML config and an `rwm` CLI over a named pipe. Hotkeys come from
+[kerys](https://github.com/tacobellerontop-sudo/kerys), a separate hotkey daemon that
+rustWM starts for you.
 
 > Work in progress. See the milestones below for what works today.
 
@@ -12,11 +15,23 @@ hotkeys, and an `rwm` CLI over a named pipe.
 | Crate | Job |
 |---|---|
 | `rwm-core` | Pure Rust: window state, layouts, commands, rules. No Win32, tested on any OS through a fake `Platform`. |
-| `rwm-win32` | The real `Platform` over the `windows` crate: enumeration, hooks, hotkeys, monitors, DPI, positioning. |
-| `rwm-config` | TOML schema, defaults, validation, keybinding parser. |
+| `rwm-win32` | The real `Platform` over the `windows` crate: enumeration, WinEvent hooks, monitors, DPI, positioning, starting kerys. |
+| `rwm-config` | TOML schema, defaults, validation. |
 | `rwm-ipc` | JSON message types and the named-pipe client/server (`\\.\pipe\rustwm`). |
 | `rustwm` | The daemon binary (`rustwm.exe`). |
 | `rwm-cli` | The `rwm.exe` command users and scripts call. |
+
+### rustWM and kerys
+
+rustWM doesn't read the keyboard. kerys does: it holds the low-level keyboard hook,
+binding modes and the key config, and sends each command to rustWM over
+`\\.\pipe\rustwm`, the same way `rwm` does. When rustWM starts it launches
+`kerys.exe` (from its own folder, or from `PATH`), and when rustWM exits or crashes
+kerys exits too. Set `hotkeys = ""` under `[general]` to drive rustWM with something else
+(AutoHotkey, whkd, scripts).
+
+The CI build and release zip contain all three exes: `rustwm.exe`, `rwm.exe` and
+`kerys.exe`.
 
 ## Building
 
@@ -31,18 +46,21 @@ Logging is controlled with `RUST_LOG`, e.g. `RUST_LOG=rwm_core=debug`.
 ## Using it
 
 ```powershell
-cargo build --release              # or download a release zip
+cargo build --release              # or download a release zip (it includes kerys.exe)
 .\target\release\rwm.exe start     # starts rustwm.exe in the background, with a tray icon
 .\target\release\rwm.exe stop      # quits and restores every window
 rwm autostart on                   # start at login
 ```
 
 Or just double-click `rwm.exe` (or run it with no arguments) for a menu: start/stop,
-a Settings screen (focus follows mouse, workspace mode, layout, terminal, border, gaps),
-edit and check the config, see your keybindings, autostart, and "Add rwm to PATH" so
-`rwm` works without `.\` in any new terminal.
+a Settings screen (focus follows mouse, workspace mode, layout, terminal, border, gaps,
+hotkey daemon), edit and check the config, edit (in the kerys settings window) and list
+your keybindings, autostart, and "Add rwm to PATH" so `rwm` works without `.\` in any
+new terminal.
 
-Keep both `.exe` files in the same folder. Logs go to
+Keep the three `.exe` files in the same folder. When building from source, build
+[kerys](https://github.com/tacobellerontop-sudo/kerys) too and put `kerys.exe` next to
+`rustwm.exe`. Logs go to
 `%LOCALAPPDATA%\rustwm\rustwm.log`; run `rustwm.exe` directly to see them in a console.
 
 On first run rustWM writes a commented config to
@@ -51,13 +69,29 @@ broken file is reported in the log and the previous config keeps running.
 
 ```toml
 [general]
-default_layout = "dwindle"       # dwindle | master | monocle
+default_layout = "dwindle"       # dwindle | master | monocle | columns | rows | grid | center
+layout_cycle = ["dwindle", "master", "monocle"]   # what cycle-layout steps through
 new_window = "after-focused"     # after-focused: split the focused window in half (Hyprland)
                                  # end | start: split the last / first window
 workspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 workspace_mode = "per-monitor"   # per-monitor | global (Win+Alt+W toggles)
 focus_follows_mouse = false      # focus windows by hovering, no click needed
+mouse_follows_focus = false      # put the mouse on windows focused with keys
+workspace_back_and_forth = false # workspace key of the current one goes back
+inactive_opacity = 1.0           # 0.1-1.0: translucent unfocused windows
 terminal = "wezterm-gui.exe"     # Win+Enter; defaults to wt.exe, then cmd.exe
+hotkeys = "kerys.exe"            # hotkey daemon to start; "" for none
+exec_on_start = ["yasb.exe"]     # run once when rustWM starts
+
+hide_method = "offscreen"        # offscreen: keep taskbar buttons | hide
+
+[animation]
+enabled = true
+duration_ms = 200
+
+[workspace.9]                    # per-workspace layout and gaps
+layout = "monocle"
+gaps_inner = 0
 
 [gaps]
 inner = 8
@@ -69,12 +103,9 @@ enabled = true
 width = 3
 color = "#89b4fa"
 
-[bindings]                       # merged over the defaults; "none" unbinds
-"win+t" = "exec wezterm-gui.exe start --cwd ~"
-
 [[rules]]
 match = { exe = "Spotify.exe" }  # exe/class: whole-value regex; title: regex search
-actions = ["workspace 9"]        # float | ignore | tile | workspace <name>
+actions = ["workspace 9"]        # float | ignore | tile | pin | workspace <name> | monitor <n>
 ```
 
 ### Windows that can't be resized
@@ -127,7 +158,56 @@ remembered. Dragging from the title bar moves it instead: drop it on another win
 swap them, or on another monitor to move it there. Floating windows move and resize
 freely.
 
+### Stacks, pinning, maximize (from komorebi and Hyprland)
+
+- **Stacks** (komorebi's stacks, Hyprland's groups): `stack left` puts the focused
+  window in the tile of its neighbour on the left. Only one window of a stack shows;
+  `cycle-stack next|prev` flips through them, `unstack` gives the window its own tile
+  again, `stack-all` / `unstack-all` do the whole workspace. Closing the shown window
+  shows the next one in the same tile. Status bars see stacks in `rwm query state`.
+- **Stack tab bar** (komorebi's stackbar, Hyprland's groupbar): every stack gets a strip
+  of tabs on top listing its windows by title; click a tab to show that window.
+  `[stackbar]` sets the height and colours, or turns it off.
+- **Window swallowing** (Hyprland's `enable_swallow`): with `[swallow] enabled = true`,
+  an app started from a terminal (Windows Terminal, WezTerm, Alacritty, cmd, pwsh…) takes
+  the terminal's tile, and the terminal comes back when the app closes. The terminal is
+  stacked under the app, so `cycle-stack` or its tab shows it meanwhile.
+- **Pin** (`toggle-pin`, or a `pin` rule): a floating window that stays on screen when
+  its monitor switches workspace, like a video player.
+- **Maximize** (`toggle-maximize`): fill the work area but keep gaps and the taskbar,
+  unlike `toggle-fullscreen`. Hyprland's `fullscreen 1`, komorebi's `toggle-maximize`.
+- **Focus last** (`focus last`): jump back to the previous window, switching workspace
+  if needed. `workspace last` does the same for workspaces, and
+  `workspace_back_and_forth` makes pressing the current workspace's key do it.
+- **Workspaces**: `workspace next|prev|empty`, `move-to-workspace 3 follow` (move and go
+  along), `swap-workspaces right` (trade windows with the next monitor).
+- **Layouts**: `columns`, `rows`, `grid` and `center` (the first window in the middle,
+  for ultrawide screens) join dwindle, master and monocle. `flip-layout horizontal|vertical`
+  mirrors any layout. In master, `master-count +1|-1|<n>` sets how many windows share the
+  master area and `master-side left|right|top|bottom|next` moves it (Hyprland's `nmaster`
+  and `orientation`; `master_count` / `master_side` in the config). In dwindle, `toggle-split` turns the split the focused window is in
+  between side-by-side and stacked (Hyprland's `togglesplit`).
+- **Keyboard resizing**: `resize left|right|up|down [pixels]` moves the edge between the
+  focused window and its neighbour (a floating window grows on that side), and
+  `move <dir>` nudges a floating window. `center` centres a floating window.
+- **Pause** (`toggle-pause`): leave all windows alone until resumed; windows opened in
+  between are picked up then. `unmanage` lets go of one window, `manage` forces rustWM
+  to take one it skipped.
+- **Focus any window** (`focus-window <handle|exe:regex|title:regex|class:regex>`):
+  switches to its workspace or stack tab; with several matches, each run goes to the
+  next one (Hyprland's `focuswindow`). `minimize` minimizes the focused window.
+- **Rules**: `size 800x600` floats a window at that size, centred.
+- **Room for a status bar**: `[work_area_offset] top = 32` (or bottom/left/right) keeps
+  that much space free on every monitor (komorebi's `work_area_offset`).
+- **Translucent unfocused windows** (`inactive_opacity`) and **mouse follows focus**.
+- **Animations**: windows slide to their new place (ease-out, 200 ms by default; the
+  focus border slides along). `[animation] enabled = false` or `duration_ms` to tune.
+
 ### Default keys
+
+These come from kerys. Change them in `%USERPROFILE%\.config\kerys\kerys.toml`; on its
+first run kerys copies any `[bindings]` and `[modes]` you had in `rustwm.toml`, which
+rustWM now ignores. See the kerys README for the format.
 
 | Keys | Command |
 |---|---|
@@ -143,7 +223,7 @@ freely.
 | Win + Space | cycle layout (dwindle → master → monocle) |
 | Win + F / Win + Shift + F | toggle floating / fullscreen |
 | Win + = / Win + - | grow / shrink the focused window |
-| Win + Shift + Q | close window |
+| Win + Q or Win + Shift + Q | close window |
 | Win + Shift + R | reload config |
 | Win + ` / Win + Shift + ` | toggle the scratchpad / send window to it |
 | Win + Alt + R | resize mode: H/J/K/L or arrows, Esc or Enter to leave |
@@ -156,13 +236,21 @@ there.
 
 ### Commands
 
-Bindings and `rwm <command>` use one command language:
-`focus <dir|next|prev>`, `move <dir|next|prev>`, `promote`, `close`, `terminal`,
-`exec <command line>`, `workspace <name|n>`, `move-to-workspace <name|n>`,
+kerys bindings and `rwm <command>` use one command language:
+`focus <dir|next|prev|last>`, `move <dir|next|prev>`, `promote`, `close`, `terminal`,
+`exec <command line>`, `workspace <name|n|next|prev|last|empty>`,
+`move-to-workspace <name|n> [follow]`, `swap-workspaces <dir>`,
 `workspace-mode <global|per-monitor|toggle>`,
-`focus-monitor <dir>`, `move-to-monitor <dir>`, `layout <dwindle|master|monocle|reset>`,
-`cycle-layout`, `resize <grow|shrink> [amount]`, `toggle-float`, `toggle-fullscreen`,
-`toggle-special [name]`, `mode <name>`, `retile`, `reload`, `restore`, `quit`.
+`focus-monitor <dir>`, `move-to-monitor <dir>`,
+`layout <dwindle|master|monocle|columns|rows|grid|center|reset>`,
+`cycle-layout [next|prev]`, `flip-layout <horizontal|vertical>`, `toggle-split`,
+`master-count <+n|-n|n>`, `master-side <left|right|top|bottom|next>`,
+`resize <grow|shrink> [amount]`, `resize <dir> [pixels]`, `toggle-float`,
+`toggle-fullscreen`, `toggle-maximize`, `toggle-pin`, `center`, `minimize`,
+`focus-window <handle|exe:regex|title:regex|class:regex>`,
+`stack <dir>`, `unstack`, `cycle-stack <next|prev>`, `stack-all`, `unstack-all`,
+`toggle-special [name]`, `toggle-pause`, `manage`, `unmanage`,
+`retile`, `reload`, `restore`, `quit`.
 `move-to-workspace special:<name>` sends a window to a special workspace, and rules can use
 `workspace special:<name>` too. An empty special workspace opens your terminal when shown.
 
@@ -181,7 +269,7 @@ rwm restore                                    # works even if rustWM crashed
 | Request | Reply |
 |---|---|
 | `{"cmd": "focus left"}` | `{"v":1,"ok":true}` once the command ran, or `{"v":1,"ok":false,"error":"..."}` |
-| `{"query": "state"}` | `{"v":1,"ok":true,"data":{...}}`: monitors, workspaces, windows, focus, mode |
+| `{"query": "state"}` | `{"v":1,"ok":true,"data":{...}}`: monitors, workspaces, windows, focus |
 | `{"subscribe": ["workspace","focus"]}` | `{"v":1,"ok":true}`, then `{"v":1,"event":"init","state":{...}}` and one event per change |
 
 ### Known limitations
@@ -190,7 +278,11 @@ rwm restore                                    # works even if rustWM crashed
   for focus, set the `DisableLockWorkstation` registry value
   (`HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System`), or use Win + Right.
 - Windows of elevated (admin) apps cannot be moved by a non-elevated rustWM.
-- Windows on inactive workspaces are hidden, so they leave the taskbar until you switch back.
+- Windows of inactive workspaces are moved just past the edge of your monitors
+  (`hide_method = "offscreen"`, the default), so they keep their taskbar buttons; clicking
+  one, or Alt+Tabbing to it, switches to its workspace. They still show up in Alt+Tab
+  and taskbar previews. `hide_method = "hide"` hides them instead, which takes them off
+  the taskbar until you switch back.
 
 ## Milestones
 

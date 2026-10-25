@@ -1,5 +1,5 @@
-//! The Win32 thread: WinEvent hooks, the keyboard hook and display-change
-//! notifications, turned into [`Event`]s for the core thread.
+//! The Win32 thread: WinEvent hooks and display-change notifications, turned
+//! into [`Event`]s for the core thread.
 
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, w};
 
-use crate::{border, hotkeys, tray, window};
+use crate::{border, stackbar, tray, window};
 
 /// Where every callback sends its events. Set once by [`EventThread::spawn`];
 /// the callbacks are plain `extern "system"` functions with no user data.
@@ -201,9 +201,9 @@ fn run() {
             }
         })
         .collect();
-    let keyboard = hotkeys::install();
     let hidden = create_hidden_window();
     border::create();
+    stackbar::create();
     match hidden {
         Some(h) => tray::add(h),
         None => warn!("could not create the hidden window; display changes will be missed"),
@@ -223,9 +223,6 @@ fn run() {
         if let Some(h) = hidden {
             tray::remove(h);
             let _ = DestroyWindow(h);
-        }
-        if let Some(k) = keyboard {
-            hotkeys::uninstall(k);
         }
     }
     debug!("win32 event loop stopped");

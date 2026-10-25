@@ -43,25 +43,81 @@ pub const DEFAULT_RATIO: f32 = 0.5;
 pub const MIN_RATIO: f32 = 0.1;
 pub const MAX_RATIO: f32 = 0.9;
 
-/// Per-split ratio overrides from resizing. Split `i` is the one that gives
-/// window `i` its share of the remaining space. Missing entries mean 0.5.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Ratios(pub Vec<f32>);
+/// Per-split ratio overrides from resizing, plus the master layout's
+/// settings. Split `i` is the one that gives window `i` its share of the
+/// remaining space. Missing entries mean 0.5.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ratios {
+    pub splits: Vec<f32>,
+    /// How many windows share the master area (Hyprland's `nmaster`).
+    pub master_count: usize,
+    /// Which side of the screen the master area is on.
+    pub master_side: Side,
+}
+
+impl Default for Ratios {
+    fn default() -> Self {
+        Self {
+            splits: Vec::new(),
+            master_count: 1,
+            master_side: Side::Left,
+        }
+    }
+}
 
 impl Ratios {
     pub fn get(&self, split: usize) -> f32 {
-        self.0.get(split).copied().unwrap_or(DEFAULT_RATIO)
+        self.splits.get(split).copied().unwrap_or(DEFAULT_RATIO)
     }
 
     pub fn set(&mut self, split: usize, ratio: f32) {
-        if self.0.len() <= split {
-            self.0.resize(split + 1, DEFAULT_RATIO);
+        if self.splits.len() <= split {
+            self.splits.resize(split + 1, DEFAULT_RATIO);
         }
-        self.0[split] = ratio.clamp(MIN_RATIO, MAX_RATIO);
+        self.splits[split] = ratio.clamp(MIN_RATIO, MAX_RATIO);
     }
 
+    /// Forgets the resized ratios; the master settings stay.
     pub fn reset(&mut self) {
-        self.0.clear();
+        self.splits.clear();
+    }
+}
+
+/// A side of the work area, for the master layout's orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    #[default]
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Side {
+    pub const ALL: [Side; 4] = [Side::Left, Side::Right, Side::Top, Side::Bottom];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
+            Side::Top => "top",
+            Side::Bottom => "bottom",
+        }
+    }
+}
+
+impl std::str::FromStr for Side {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL.into_iter().find(|x| x.name() == s).ok_or(())
+    }
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -77,16 +133,48 @@ pub enum LayoutKind {
     Master,
     /// Every window fills the work area; the focused one is on top.
     Monocle,
+    /// Equal-width columns, left to right (komorebi's `columns`).
+    Columns,
+    /// Equal-height rows, top to bottom (komorebi's `rows`).
+    Rows,
+    /// As close to a square grid as the window count allows.
+    Grid,
+    /// For ultrawide screens: the first window in the middle at the master
+    /// ratio, the second on the left, the rest stacked on the right
+    /// (komorebi's `ultrawide-vertical-stack`, Hyprland's centred master).
+    Center,
 }
 
 impl LayoutKind {
-    pub const ALL: [LayoutKind; 3] = [LayoutKind::Dwindle, LayoutKind::Master, LayoutKind::Monocle];
+    pub const ALL: [LayoutKind; 7] = [
+        LayoutKind::Dwindle,
+        LayoutKind::Master,
+        LayoutKind::Monocle,
+        LayoutKind::Columns,
+        LayoutKind::Rows,
+        LayoutKind::Grid,
+        LayoutKind::Center,
+    ];
+
+    /// The layouts `cycle-layout` goes through unless the config says otherwise.
+    pub const DEFAULT_CYCLE: [LayoutKind; 3] =
+        [LayoutKind::Dwindle, LayoutKind::Master, LayoutKind::Monocle];
 
     pub fn arrange(self, count: usize, area: Rect, gaps: Gaps, ratios: &Ratios) -> Vec<Rect> {
         match self {
             LayoutKind::Dwindle => dwindle(count, area, gaps, ratios),
             LayoutKind::Master => master(count, area, gaps, ratios),
             LayoutKind::Monocle => monocle(count, area, gaps),
+            LayoutKind::Columns => {
+                let gaps = effective_gaps(count, gaps);
+                columns(count, area.inset(gaps.outer), gaps.inner)
+            }
+            LayoutKind::Rows => {
+                let gaps = effective_gaps(count, gaps);
+                rows(count, area.inset(gaps.outer), gaps.inner)
+            }
+            LayoutKind::Grid => grid(count, area, gaps),
+            LayoutKind::Center => center(count, area, gaps, ratios),
         }
     }
 
@@ -95,13 +183,28 @@ impl LayoutKind {
             LayoutKind::Dwindle => "dwindle",
             LayoutKind::Master => "master",
             LayoutKind::Monocle => "monocle",
+            LayoutKind::Columns => "columns",
+            LayoutKind::Rows => "rows",
+            LayoutKind::Grid => "grid",
+            LayoutKind::Center => "center",
         }
     }
 
-    /// The next layout in `cycle-layout` order.
+    /// The layout `step` places after this one in `cycle` (wrapping). A
+    /// layout not in the cycle steps to the cycle's first one.
+    pub fn cycled(self, cycle: &[LayoutKind], step: isize) -> Self {
+        if cycle.is_empty() {
+            return self;
+        }
+        match cycle.iter().position(|l| *l == self) {
+            Some(i) => cycle[(i as isize + step).rem_euclid(cycle.len() as isize) as usize],
+            None => cycle[0],
+        }
+    }
+
+    /// The next layout in the default `cycle-layout` order.
     pub fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|l| *l == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
+        self.cycled(&Self::DEFAULT_CYCLE, 1)
     }
 
     /// Adjusts `ratios` so the window at `index` of `count` grows by `delta`
@@ -111,12 +214,17 @@ impl LayoutKind {
             return false;
         }
         let (split, sign) = match self {
-            LayoutKind::Monocle => return false,
+            LayoutKind::Monocle | LayoutKind::Columns | LayoutKind::Rows | LayoutKind::Grid => {
+                return false;
+            }
+            LayoutKind::Center if index == 0 => (0, 1.0),
+            LayoutKind::Center => (0, -1.0),
             // Window i owns the first part of split i; the last window owns
             // the second part of the final split.
             LayoutKind::Dwindle if index < count - 1 => (index, 1.0),
             LayoutKind::Dwindle => (count - 2, -1.0),
-            LayoutKind::Master if index == 0 => (0, 1.0),
+            LayoutKind::Master if count <= ratios.master_count.max(1) => return false,
+            LayoutKind::Master if index < ratios.master_count.max(1) => (0, 1.0),
             LayoutKind::Master => (0, -1.0),
         };
         ratios.set(split, ratios.get(split) + sign * delta);
@@ -129,8 +237,10 @@ impl LayoutKind {
     /// fit them (outer split first).
     fn splits_for(self, index: usize, count: usize) -> Vec<usize> {
         match self {
-            LayoutKind::Monocle => Vec::new(),
-            LayoutKind::Master => vec![0],
+            LayoutKind::Monocle | LayoutKind::Columns | LayoutKind::Rows | LayoutKind::Grid => {
+                Vec::new()
+            }
+            LayoutKind::Master | LayoutKind::Center => vec![0],
             LayoutKind::Dwindle => {
                 let mut s = Vec::new();
                 if index > 0 {
@@ -267,22 +377,41 @@ fn rows(count: usize, r: Rect, gap: i32) -> Vec<Rect> {
         .collect()
 }
 
+/// The first `ratios.master_count` windows share the master area on
+/// `ratios.master_side` at the master ratio; the rest split the other part.
 pub fn master(count: usize, area: Rect, gaps: Gaps, ratios: &Ratios) -> Vec<Rect> {
+    let (n, side) = (ratios.master_count.max(1), ratios.master_side);
     let gaps = effective_gaps(count, gaps);
     let area = area.inset(gaps.outer);
-    match count {
-        0 => Vec::new(),
-        1 => vec![area],
-        _ => {
-            let usable = (area.w - gaps.inner).max(0);
-            let mw = (usable as f32 * ratios.get(0)).round() as i32;
-            let main = Rect::new(area.x, area.y, mw, area.h);
-            let stack = Rect::new(area.x + mw + gaps.inner, area.y, usable - mw, area.h);
-            let mut out = vec![main];
-            out.extend(rows(count - 1, stack, gaps.inner));
-            out
+    // Lay out masters-on-the-left in a (possibly transposed) frame, then
+    // map the rects back.
+    let transposed = matches!(side, Side::Top | Side::Bottom);
+    let t = |r: Rect| {
+        if transposed {
+            Rect::new(r.y, r.x, r.h, r.w)
+        } else {
+            r
+        }
+    };
+    let frame = t(area);
+    let mut out = if count <= n {
+        rows(count, frame, gaps.inner)
+    } else {
+        let usable = (frame.w - gaps.inner).max(0);
+        let mw = (usable as f32 * ratios.get(0)).round() as i32;
+        let main = Rect::new(frame.x, frame.y, mw, frame.h);
+        let stack = Rect::new(frame.x + mw + gaps.inner, frame.y, usable - mw, frame.h);
+        let mut out = rows(n, main, gaps.inner);
+        out.extend(rows(count - n, stack, gaps.inner));
+        out
+    };
+    for r in &mut out {
+        *r = t(*r);
+        if matches!(side, Side::Right | Side::Bottom) {
+            *r = flip(*r, area, side == Side::Right, side == Side::Bottom);
         }
     }
+    out
 }
 
 pub fn monocle(count: usize, area: Rect, gaps: Gaps) -> Vec<Rect> {
@@ -291,24 +420,82 @@ pub fn monocle(count: usize, area: Rect, gaps: Gaps) -> Vec<Rect> {
     vec![area.inset(gaps.outer); count]
 }
 
-/// Equal-width columns across `area`, left to right. The last column absorbs
-/// any rounding remainder so the columns cover the area exactly.
-pub fn columns(count: usize, area: Rect) -> Vec<Rect> {
+/// Equal-width columns across `area`, left to right, with `gap` between
+/// them. The last column absorbs any rounding remainder so the columns cover
+/// the area exactly.
+pub fn columns(count: usize, area: Rect, gap: i32) -> Vec<Rect> {
     if count == 0 {
         return Vec::new();
     }
     let n = count as i32;
-    let base = area.w / n;
+    let usable = (area.w - gap * (n - 1)).max(0);
+    let base = usable / n;
     (0..n)
         .map(|i| {
             let w = if i == n - 1 {
-                area.w - base * (n - 1)
+                usable - base * (n - 1)
             } else {
                 base
             };
-            Rect::new(area.x + base * i, area.y, w, area.h)
+            Rect::new(area.x + (base + gap) * i, area.y, w, area.h)
         })
         .collect()
+}
+
+/// Columns of rows, as square as possible: `ceil(sqrt(n))` columns, the
+/// first ones taking an extra row when the count doesn't divide evenly.
+pub fn grid(count: usize, area: Rect, gaps: Gaps) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let gaps = effective_gaps(count, gaps);
+    let cols = (count as f64).sqrt().ceil() as usize;
+    let (per, extra) = (count / cols, count % cols);
+    columns(cols, area.inset(gaps.outer), gaps.inner)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, col)| rows(per + usize::from(i < extra), col, gaps.inner))
+        .collect()
+}
+
+/// The first window in the middle at the master ratio, the second on its
+/// left and the rest in rows on its right. Two windows split like `master`.
+pub fn center(count: usize, area: Rect, gaps: Gaps, ratios: &Ratios) -> Vec<Rect> {
+    if count < 3 {
+        let ratios = Ratios {
+            master_count: 1,
+            master_side: Side::Left,
+            ..ratios.clone()
+        };
+        return master(count, area, gaps, &ratios);
+    }
+    let gaps = effective_gaps(count, gaps);
+    let area = area.inset(gaps.outer);
+    let usable = (area.w - 2 * gaps.inner).max(0);
+    let mw = (usable as f32 * ratios.get(0)).round() as i32;
+    let side = (usable - mw) / 2;
+    let left = Rect::new(area.x, area.y, side, area.h);
+    let main = Rect::new(area.x + side + gaps.inner, area.y, mw, area.h);
+    let rx = main.right() + gaps.inner;
+    let right = Rect::new(rx, area.y, area.right() - rx, area.h);
+    let mut out = vec![main, left];
+    out.extend(rows(count - 2, right, gaps.inner));
+    out
+}
+
+/// Mirrors `r` inside `area`: left-right when `h`, top-bottom when `v`.
+pub fn flip(r: Rect, area: Rect, h: bool, v: bool) -> Rect {
+    let x = if h {
+        area.x + area.right() - r.right()
+    } else {
+        r.x
+    };
+    let y = if v {
+        area.y + area.bottom() - r.bottom()
+    } else {
+        r.y
+    };
+    Rect::new(x, y, r.w, r.h)
 }
 
 #[cfg(test)]
@@ -429,6 +616,48 @@ mod tests {
     }
 
     #[test]
+    fn master_count_and_side() {
+        let area = Rect::new(0, 0, 1000, 800);
+        let mut r = Ratios {
+            master_count: 2,
+            ..Ratios::default()
+        };
+        assert_eq!(
+            master(3, area, NO_GAPS, &r),
+            vec![
+                Rect::new(0, 0, 500, 400),
+                Rect::new(0, 400, 500, 400),
+                Rect::new(500, 0, 500, 800),
+            ]
+        );
+        // All masters: they share the whole area.
+        assert_eq!(
+            master(2, area, NO_GAPS, &r),
+            vec![Rect::new(0, 0, 1000, 400), Rect::new(0, 400, 1000, 400)]
+        );
+        r.master_count = 1;
+        r.master_side = Side::Right;
+        assert_eq!(
+            master(2, area, NO_GAPS, &r),
+            vec![Rect::new(500, 0, 500, 800), Rect::new(0, 0, 500, 800)]
+        );
+        r.master_side = Side::Top;
+        assert_eq!(
+            master(3, area, NO_GAPS, &r),
+            vec![
+                Rect::new(0, 0, 1000, 400),
+                Rect::new(0, 400, 500, 400),
+                Rect::new(500, 400, 500, 400),
+            ]
+        );
+        r.master_side = Side::Bottom;
+        assert_eq!(
+            master(2, area, NO_GAPS, &r)[0],
+            Rect::new(0, 400, 1000, 400)
+        );
+    }
+
+    #[test]
     fn master_with_gaps_and_ratio() {
         let gaps = Gaps {
             inner: 10,
@@ -466,6 +695,10 @@ mod tests {
         }
         assert_eq!(LayoutKind::Dwindle.next(), LayoutKind::Master);
         assert_eq!(LayoutKind::Monocle.next(), LayoutKind::Dwindle);
+        let cycle = [LayoutKind::Dwindle, LayoutKind::Grid];
+        assert_eq!(LayoutKind::Dwindle.cycled(&cycle, -1), LayoutKind::Grid);
+        assert_eq!(LayoutKind::Grid.cycled(&cycle, 1), LayoutKind::Dwindle);
+        assert_eq!(LayoutKind::Master.cycled(&cycle, 1), LayoutKind::Dwindle);
         assert!("spiral".parse::<LayoutKind>().is_err());
     }
 
@@ -525,7 +758,7 @@ mod tests {
 
     #[test]
     fn three_columns_cover_area() {
-        let rects = columns(3, Rect::new(0, 0, 1000, 500));
+        let rects = columns(3, Rect::new(0, 0, 1000, 500), 0);
         assert_eq!(
             rects,
             vec![
@@ -534,5 +767,71 @@ mod tests {
                 Rect::new(666, 0, 334, 500),
             ]
         );
+    }
+
+    #[test]
+    fn columns_and_rows_with_gaps() {
+        let gaps = Gaps {
+            inner: 10,
+            outer: 10,
+            smart: true,
+        };
+        let area = Rect::new(0, 0, 1000, 500);
+        assert_eq!(
+            LayoutKind::Columns.arrange(2, area, gaps, &Ratios::default()),
+            vec![Rect::new(10, 10, 485, 480), Rect::new(505, 10, 485, 480)]
+        );
+        assert_eq!(
+            LayoutKind::Rows.arrange(2, area, gaps, &Ratios::default()),
+            vec![Rect::new(10, 10, 980, 235), Rect::new(10, 255, 980, 235)]
+        );
+        assert_eq!(
+            LayoutKind::Columns.arrange(1, area, gaps, &Ratios::default()),
+            vec![area]
+        );
+    }
+
+    #[test]
+    fn grid_is_square_ish() {
+        // 5 windows: 3 columns, the first two with two rows each.
+        let rects = grid(5, Rect::new(0, 0, 900, 600), NO_GAPS);
+        assert_eq!(
+            rects,
+            vec![
+                Rect::new(0, 0, 300, 300),
+                Rect::new(0, 300, 300, 300),
+                Rect::new(300, 0, 300, 300),
+                Rect::new(300, 300, 300, 300),
+                Rect::new(600, 0, 300, 600),
+            ]
+        );
+        assert_eq!(grid(4, AREA, NO_GAPS).len(), 4);
+    }
+
+    #[test]
+    fn center_puts_the_first_window_in_the_middle() {
+        let rects = center(4, Rect::new(0, 0, 2000, 1000), NO_GAPS, &Ratios::default());
+        assert_eq!(
+            rects,
+            vec![
+                Rect::new(500, 0, 1000, 1000),
+                Rect::new(0, 0, 500, 1000),
+                Rect::new(1500, 0, 500, 500),
+                Rect::new(1500, 500, 500, 500),
+            ]
+        );
+        let mut r = Ratios::default();
+        assert!(LayoutKind::Center.resize(&mut r, 0, 4, 0.1));
+        assert_eq!(r.get(0), 0.6);
+        assert_eq!(center(2, AREA, NO_GAPS, &r).len(), 2);
+    }
+
+    #[test]
+    fn flip_mirrors_inside_the_area() {
+        let area = Rect::new(100, 0, 1000, 500);
+        let r = Rect::new(100, 0, 300, 100);
+        assert_eq!(flip(r, area, true, false), Rect::new(800, 0, 300, 100));
+        assert_eq!(flip(r, area, false, true), Rect::new(100, 400, 300, 100));
+        assert_eq!(flip(flip(r, area, true, true), area, true, true), r);
     }
 }

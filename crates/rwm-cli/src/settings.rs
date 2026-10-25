@@ -6,7 +6,6 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use rwm_core::wm::Settings;
 use toml_edit::{DocumentMut, value};
 
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +20,8 @@ enum Kind {
     Color,
     /// A command line, typed in; `-` removes it.
     Command,
+    /// The hotkey daemon's command line; `off` for none, `-` for kerys.
+    Hotkeys,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,13 +49,27 @@ const SETTINGS: &[Setting] = &[
         label: "Layout for new workspaces",
         section: "general",
         key: "default_layout",
-        kind: Kind::Choice(&["dwindle", "master", "monocle"]),
+        kind: Kind::Choice(&[
+            "dwindle", "master", "monocle", "columns", "rows", "grid", "center",
+        ]),
     },
     Setting {
         label: "Where new windows go",
         section: "general",
         key: "new_window",
         kind: Kind::Choice(&["after-focused", "end", "start"]),
+    },
+    Setting {
+        label: "Mouse follows keyboard focus",
+        section: "general",
+        key: "mouse_follows_focus",
+        kind: Kind::Bool,
+    },
+    Setting {
+        label: "Workspace key twice goes back",
+        section: "general",
+        key: "workspace_back_and_forth",
+        kind: Kind::Bool,
     },
     Setting {
         label: "Terminal (Win+Enter)",
@@ -98,13 +113,41 @@ const SETTINGS: &[Setting] = &[
         key: "smart",
         kind: Kind::Bool,
     },
+    Setting {
+        label: "Master area side",
+        section: "general",
+        key: "master_side",
+        kind: Kind::Choice(&["left", "right", "top", "bottom"]),
+    },
+    Setting {
+        label: "Tab bar over stacks",
+        section: "stackbar",
+        key: "enabled",
+        kind: Kind::Bool,
+    },
+    Setting {
+        label: "Apps swallow their terminal",
+        section: "swallow",
+        key: "enabled",
+        kind: Kind::Bool,
+    },
+    Setting {
+        label: "Hotkey daemon (applies on restart)",
+        section: "general",
+        key: "hotkeys",
+        kind: Kind::Hotkeys,
+    },
 ];
 
 /// The current value of `s` as shown in the menu.
-fn current(s: &Setting, cfg: &Settings) -> String {
+fn current(s: &Setting, loaded: &rwm_config::Loaded) -> String {
+    let cfg = &loaded.settings;
     let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
     match (s.section, s.key) {
+        ("general", "hotkeys") => loaded.hotkeys.clone().unwrap_or_else(|| "off".into()),
         ("general", "focus_follows_mouse") => on_off(cfg.focus_follows_mouse),
+        ("general", "mouse_follows_focus") => on_off(cfg.mouse_follows_focus),
+        ("general", "workspace_back_and_forth") => on_off(cfg.workspace_back_and_forth),
         ("general", "workspace_mode") => cfg.workspace_mode.to_string(),
         ("general", "default_layout") => cfg.default_layout.to_string(),
         ("general", "new_window") => match cfg.new_window {
@@ -123,6 +166,9 @@ fn current(s: &Setting, cfg: &Settings) -> String {
         ("gaps", "inner") => cfg.gaps.inner.to_string(),
         ("gaps", "outer") => cfg.gaps.outer.to_string(),
         ("gaps", "smart") => on_off(cfg.gaps.smart),
+        ("general", "master_side") => cfg.master_side.to_string(),
+        ("stackbar", "enabled") => on_off(cfg.stackbar.enabled),
+        ("swallow", "enabled") => on_off(cfg.swallow.enabled),
         _ => String::new(),
     }
 }
@@ -230,6 +276,15 @@ fn new_value(
             Some(v) if v == "-" => Some(NewValue::Remove),
             Some(v) => Some(NewValue::Str(v)),
         },
+        Kind::Hotkeys => match prompt(
+            stdin,
+            "kerys.exe, another program, off for none, - for kerys (Enter to keep)",
+        )? {
+            None => None,
+            Some(v) if v == "-" => Some(NewValue::Remove),
+            Some(v) if v.eq_ignore_ascii_case("off") => Some(NewValue::Str(String::new())),
+            Some(v) => Some(NewValue::Str(v)),
+        },
     })
 }
 
@@ -255,10 +310,7 @@ pub fn run(config: &Path, stdin: &mut impl BufRead) -> anyhow::Result<()> {
         println!("  Saved to {}.", config.display());
         println!("  A running rustWM picks changes up straight away.");
         println!();
-        let shown: Vec<String> = SETTINGS
-            .iter()
-            .map(|s| current(s, &loaded.settings))
-            .collect();
+        let shown: Vec<String> = SETTINGS.iter().map(|s| current(s, &loaded)).collect();
         let width = SETTINGS.iter().map(|s| s.label.len()).max().unwrap_or(0);
         for (i, (s, v)) in SETTINGS.iter().zip(&shown).enumerate() {
             println!("  {:>2}  {:width$}  {v}", i + 1, s.label);
@@ -310,7 +362,7 @@ mod tests {
 
     #[test]
     fn every_setting_is_known_to_the_config() {
-        let defaults = rwm_config::parse(DEFAULT).unwrap().settings;
+        let defaults = rwm_config::parse(DEFAULT).unwrap();
         for s in SETTINGS {
             assert!(!current(s, &defaults).is_empty(), "{}", s.key);
         }
@@ -353,6 +405,17 @@ mod tests {
         assert_eq!(s.terminal.as_deref(), Some("alacritty.exe"));
         let out = set(&out, "general", "terminal", &NewValue::Remove).unwrap();
         assert_eq!(rwm_config::parse(&out).unwrap().settings.terminal, None);
+    }
+
+    #[test]
+    fn hotkey_daemon_can_be_turned_off_and_back() {
+        let off = set(DEFAULT, "general", "hotkeys", &NewValue::Str(String::new())).unwrap();
+        assert_eq!(rwm_config::parse(&off).unwrap().hotkeys, None);
+        let back = set(&off, "general", "hotkeys", &NewValue::Remove).unwrap();
+        assert_eq!(
+            rwm_config::parse(&back).unwrap().hotkeys.as_deref(),
+            Some(rwm_config::DEFAULT_HOTKEYS)
+        );
     }
 
     #[test]
@@ -401,10 +464,14 @@ mod tests {
         let layout = &SETTINGS[2];
         assert_eq!(
             new_value(layout, "monocle", &mut no_input).unwrap(),
+            Some(NewValue::Str("columns".into()))
+        );
+        assert_eq!(
+            new_value(layout, "center", &mut no_input).unwrap(),
             Some(NewValue::Str("dwindle".into()))
         );
         let mut typed = std::io::Cursor::new("12\n");
-        let width = &SETTINGS[6];
+        let width = &SETTINGS[8];
         assert_eq!(
             new_value(width, "3", &mut typed).unwrap(),
             Some(NewValue::Int(12))

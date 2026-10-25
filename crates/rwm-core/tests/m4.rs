@@ -1,4 +1,4 @@
-//! Special workspaces, binding modes, drag-to-swap and state snapshots.
+//! Special workspaces, drag-to-swap and state snapshots.
 
 use rwm_core::fake::{Call, FakePlatform};
 use rwm_core::rules::{Rule, RuleAction};
@@ -150,17 +150,6 @@ fn quit_restores_special_windows() {
     cmd(&mut wm, "move-to-workspace special:scratch");
     cmd(&mut wm, "quit");
     assert!(hidden(&wm).is_empty());
-}
-
-#[test]
-fn mode_command_changes_mode() {
-    let mut wm = wm_with(1);
-    assert_eq!(wm.mode(), "default");
-    cmd(&mut wm, "mode resize");
-    assert_eq!(wm.mode(), "resize");
-    assert_eq!(wm.snapshot().mode, "resize");
-    cmd(&mut wm, "mode default");
-    assert_eq!(wm.mode(), "default");
 }
 
 #[test]

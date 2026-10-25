@@ -7,6 +7,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # kerys (the hotkey daemon) ships in the same zip. Switch to main once
+  # kerys has one.
+  KERYS_REF: claude/project-thread-h7dm8t
+
 jobs:
   release:
     runs-on: windows-latest
@@ -16,12 +21,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo build --workspace --release
+      - uses: actions/checkout@v4
+        with:
+          repository: tacobellerontop-sudo/kerys
+          ref: ${{ env.KERYS_REF }}
+          path: kerys
+      - run: cargo build --release --manifest-path kerys/Cargo.toml
       - name: Package
         shell: pwsh
         run: |
           $name = "rustwm-${{ github.ref_name }}-windows-x64"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item target/release/rustwm.exe, target/release/rwm.exe, README.md, LICENSE-MIT, LICENSE-APACHE $name
+          Copy-Item target/release/rustwm.exe, target/release/rwm.exe, kerys/target/release/kerys.exe, README.md, LICENSE-MIT, LICENSE-APACHE $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
       - name: Create draft release
         uses: softprops/action-gh-release@v2

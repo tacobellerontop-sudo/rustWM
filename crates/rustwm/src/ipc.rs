@@ -60,13 +60,9 @@ impl Shared {
     }
 
     /// Records what `rwm query config` reports.
-    pub fn set_config(&self, path: &std::path::Path, bindings: &[(rwm_config::Chord, String)]) {
-        let bindings: serde_json::Map<_, _> = bindings
-            .iter()
-            .map(|(c, cmd)| (c.to_string(), json!(cmd)))
-            .collect();
+    pub fn set_config(&self, path: &std::path::Path) {
         if let Ok(mut c) = self.config.write() {
-            *c = json!({ "path": PathBuf::from(path), "bindings": bindings });
+            *c = json!({ "path": PathBuf::from(path) });
         }
     }
 

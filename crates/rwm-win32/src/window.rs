@@ -5,6 +5,9 @@ use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
@@ -67,11 +70,45 @@ fn class(h: HWND) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-fn process_id(h: HWND) -> u32 {
+pub(crate) fn process_id(h: HWND) -> u32 {
     let mut pid = 0u32;
     // SAFETY: `pid` is a valid out-pointer.
     unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
     pid
+}
+
+/// The ids of process `pid`'s parent, grandparent and so on, nearest first.
+pub(crate) fn ancestor_pids(pid: u32) -> Vec<u32> {
+    let mut parents = std::collections::HashMap::new();
+    // SAFETY: the snapshot handle is closed before returning; the entry's
+    // size field is set as the API requires.
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return Vec::new();
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut ok = Process32FirstW(snapshot, &mut entry).is_ok();
+        while ok {
+            parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+            ok = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    let mut out = Vec::new();
+    let mut p = pid;
+    // Pids 0 and 4 are the idle and system processes; a parent that is gone
+    // may have had its pid reused, so stop at loops.
+    while let Some(&parent) = parents.get(&p) {
+        if parent <= 4 || parent == pid || out.contains(&parent) {
+            break;
+        }
+        out.push(parent);
+        p = parent;
+    }
+    out
 }
 
 /// The executable file name of the process owning `h`, e.g. `firefox.exe`.
@@ -222,4 +259,25 @@ pub(crate) fn enumerate() -> Vec<WindowInfo> {
         let _ = EnumWindows(Some(collect), LPARAM(&mut handles as *mut _ as isize));
     }
     handles.into_iter().filter_map(info).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_child_process_lists_us_as_its_parent() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping -n 2 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        let ancestors = ancestor_pids(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            ancestors.first(),
+            Some(&std::process::id()),
+            "{ancestors:?}"
+        );
+    }
 }

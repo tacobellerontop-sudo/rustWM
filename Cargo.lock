@@ -394,6 +394,7 @@ dependencies = [
 name = "rwm-config"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "rwm-core",
  "serde",
  "thiserror",
@@ -424,7 +425,6 @@ dependencies = [
 name = "rwm-win32"
 version = "0.1.0"
 dependencies = [
- "rwm-config",
  "rwm-core",
  "tracing",
  "windows",

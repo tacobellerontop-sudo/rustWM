@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::platform::Result;
+use crate::platform::{PlatformOptions, Result, Stackbar};
 use crate::{Border, MonitorInfo, Platform, PlatformError, Rect, WindowHandle, WindowInfo};
 
 /// One call the core made into the platform.
@@ -19,6 +19,7 @@ pub enum Call {
     FocusDesktop,
     Close(WindowHandle),
     Spawn(String),
+    Minimize(WindowHandle),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,6 +38,16 @@ pub struct FakePlatform {
     pub failing_spawns: Vec<String>,
     /// The focus border as last drawn.
     pub border: Option<Border>,
+    /// Opacity set on windows; missing means opaque.
+    pub opacity: BTreeMap<WindowHandle, u8>,
+    /// Options from the last `configure`.
+    pub options: Option<PlatformOptions>,
+    /// The process of each window that has one.
+    pub pids: BTreeMap<WindowHandle, u32>,
+    /// Each process's parent.
+    pub parents: BTreeMap<u32, u32>,
+    /// The stack tab bars as last drawn.
+    pub stackbars: Vec<Stackbar>,
 }
 
 impl FakePlatform {
@@ -204,5 +215,51 @@ impl Platform for FakePlatform {
 
     fn set_border(&mut self, border: Option<Border>) {
         self.border = border;
+    }
+
+    fn configure(&mut self, options: PlatformOptions) {
+        self.options = Some(options);
+    }
+
+    fn set_cursor_pos(&mut self, x: i32, y: i32) -> Result<()> {
+        self.cursor = Some((x, y));
+        Ok(())
+    }
+
+    fn set_opacity(&mut self, handle: WindowHandle, alpha: u8) -> Result<()> {
+        self.get_mut(handle)?;
+        if alpha == 255 {
+            self.opacity.remove(&handle);
+        } else {
+            self.opacity.insert(handle, alpha);
+        }
+        Ok(())
+    }
+
+    fn minimize(&mut self, handle: WindowHandle) -> Result<()> {
+        self.calls.push(Call::Minimize(handle));
+        self.get_mut(handle)?.minimized = true;
+        Ok(())
+    }
+
+    fn process_id(&self, handle: WindowHandle) -> Option<u32> {
+        self.pids.get(&handle).copied()
+    }
+
+    fn ancestor_pids(&self, pid: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut p = pid;
+        while let Some(&parent) = self.parents.get(&p) {
+            if out.contains(&parent) {
+                break;
+            }
+            out.push(parent);
+            p = parent;
+        }
+        out
+    }
+
+    fn set_stackbars(&mut self, bars: &[Stackbar]) {
+        self.stackbars = bars.to_vec();
     }
 }

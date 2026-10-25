@@ -8,6 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # kerys (the hotkey daemon) is built from this branch of its repo and
+  # shipped in the same zip. Switch to main once kerys has one.
+  KERYS_REF: claude/project-thread-h7dm8t
 
 jobs:
   test:
@@ -29,11 +32,25 @@ jobs:
       - name: Build release binaries
         if: matrix.os == 'windows-latest'
         run: cargo build --workspace --release
+      - name: Check out kerys
+        if: matrix.os == 'windows-latest'
+        uses: actions/checkout@v4
+        with:
+          repository: tacobellerontop-sudo/kerys
+          ref: ${{ env.KERYS_REF }}
+          path: kerys
+      - name: Build kerys
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release --manifest-path kerys/Cargo.toml
+      - name: Collect binaries
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/rustwm.exe, target/release/rwm.exe, kerys/target/release/kerys.exe dist
       - name: Upload binaries
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: rustwm-windows-x64
-          path: |
-            target/release/rustwm.exe
-            target/release/rwm.exe
+          path: dist/*.exe
